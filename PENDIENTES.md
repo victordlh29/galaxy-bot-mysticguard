@@ -27,6 +27,11 @@ IMPORTANTE: NO tocar el archivo `.env`. NO tocar `galaxy-dashboard.html` (es sol
 
 ## Cambios hechos hasta ahora
 
+### Fix doble barra en PUBLIC_URL y despliegue activo (16/08/2026)
+- **Fix `//activity`**: si `PUBLIC_URL` se guardaba con `/` final, el enlace salía como `...//activity` y el callback OAuth derivado `...//api/auth/discord/callback` (Discord lo rechaza). Ahora `index.js` normaliza `PUBLIC_URL` y `DASHBOARD_URL` al arrancar (quita barras finales), así funciona con o sin slash.
+- **Despliegue real en justrunmy**: repo git + Dockerfile (node:22-slim + python3 para el binario de yt-dlp) + `.dockerignore`; build OK (`jrnm_app:f176090`), bot conectado como `2.0#4420`, 17 comandos en ambos servidores, dashboard en `https://gitr_o9h7k-bcb.a.jrnm.app/`.
+- **⚠️ Detectar doble instancia en justrunmy**: el log mostró DOS arranques `npm start` (mismo token+BD, colas de música separadas en memoria → bug "44 fantasma"). Pendiente de confirmar: si el panel tiene un campo de start command, debe quedarse vacío o usar solo `npm start` (el Dockerfile ya trae CMD) para que corra UNA sola instancia.
+
 ### Despliegue por git en justrunmy: Dockerfile y repo (16/08/2026)
 - **Repo git inicializado** en el proyecto y **push a justrunmy** (`git push ... HEAD:deploy`) — justrunmy exige **Dockerfile** en la raíz para construir la imagen (sin él: "No Dockerfile found").
 - **`Dockerfile` creado**: `node:20-slim` + `python3` (el binario de yt-dlp descargado por `youtube-dl-exec` en su postinstall es un zipapp de Python y necesita python3 en runtime), `npm ci --omit=dev`, `EXPOSE 3000`, `CMD node index.js`. ffmpeg-static instala su binario Linux solo.

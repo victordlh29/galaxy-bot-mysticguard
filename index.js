@@ -7,6 +7,9 @@ const { registerEvents } = require('./src/bot/events/index');
 const { createApp } = require('./src/server/app');
 const { deploy } = require('./src/bot/deploy-commands');
 
+if (process.env.PUBLIC_URL) process.env.PUBLIC_URL = process.env.PUBLIC_URL.replace(/\/+$/, '');
+if (process.env.DASHBOARD_URL) process.env.DASHBOARD_URL = process.env.DASHBOARD_URL.replace(/\/+$/, '');
+
 if (!process.env.SESSION_SECRET) {
   console.error('[SEC] SESSION_SECRET no configurado — negándose a arrancar (el fallback público es inseguro).');
   process.exit(1);
