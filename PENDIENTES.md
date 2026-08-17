@@ -27,6 +27,13 @@ IMPORTANTE: NO tocar el archivo `.env`. NO tocar `galaxy-dashboard.html` (es sol
 
 ## Cambios hechos hasta ahora
 
+### Despliegue por git en justrunmy: Dockerfile y repo (16/08/2026)
+- **Repo git inicializado** en el proyecto y **push a justrunmy** (`git push ... HEAD:deploy`) — justrunmy exige **Dockerfile** en la raíz para construir la imagen (sin él: "No Dockerfile found").
+- **`Dockerfile` creado**: `node:20-slim` + `python3` (el binario de yt-dlp descargado por `youtube-dl-exec` en su postinstall es un zipapp de Python y necesita python3 en runtime), `npm ci --omit=dev`, `EXPOSE 3000`, `CMD node index.js`. ffmpeg-static instala su binario Linux solo.
+- **`.dockerignore`** creado: excluye `node_modules`, `.env`, `cookies.txt`, `galaxy-dashboard.html`, `.git`, logs y zips del contexto de build.
+- Verificado que el código es case-sensitive-correcto (225 archivos y todos los `require`): el `MODULE_NOT_FOUND './src/bot/client'` del primer despliegue fue por un zip mal empaquetado (carpeta anidada), no por el código.
+- Recordatorio para el panel: `YT_COOKIES` (contenido de cookies.txt local) es el campo "YouTube Cookies" del panel — el bot ya lee `process.env.YT_COOKIES` (PlayerManager.js:355) antes que el archivo local, que no se sube.
+
 ### Responsive completo: navegación móvil y adaptación total (16/08/2026)
 - **Navegación móvil (`#mnav`)**: barra inferior fija dentro de `.screen` (visible solo ≤900px y con sesión) con los mismos 13 destinos del rail (icono + etiqueta, scroll horizontal). Antes, ocultar el rail dejaba sin navegación en móvil.
 - **JS**: `showView` marca `active` también en el mnav; clics del mnav navegan igual que el rail; `applyAccess` espeja la visibilidad rail→mnav; `setRailVisible` muestra/oculta el mnav junto al rail.
