@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Acceso denegado</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;font-family:'Inter','Segoe UI',system-ui,sans-serif}
+  body{background:#07090f;color:#F2F3F5;min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .card{background:#1E1F22;border:1px solid #3F4147;border-radius:14px;padding:36px 40px;max-width:420px;text-align:center}
+  .ic{width:56px;height:56px;border-radius:50%;background:rgba(242,63,67,.15);color:#F23F43;display:flex;align-items:center;justify-content:center;font-size:24px;margin:0 auto 18px}
+  h1{font-size:17px;font-weight:800}
+  p{font-size:13px;color:#B5BAC1;margin-top:10px;line-height:1.5}
+  a{display:inline-block;margin-top:22px;background:#5865F2;color:#fff;text-decoration:none;font-weight:700;font-size:13px;padding:10px 22px;border-radius:8px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="ic">✕</div>
+  <h1>Acceso denegado</h1>
+  <p>El dashboard solo está disponible para el <strong>dueño del servidor</strong>, el <strong>super admin</strong> o usuarios con permiso de <strong>administrador</strong>.</p>
+  <a href="/api/auth/login">Intentar con otra cuenta</a>
+</div>
+</body>
+</html>

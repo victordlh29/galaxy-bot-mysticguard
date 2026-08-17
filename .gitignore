@@ -1,0 +1,9 @@
+node_modules/
+.env
+cookies.txt
+galaxy-dashboard.html
+bot.log
+bot.err.log
+crash.log
+*.log
+.DS_Store

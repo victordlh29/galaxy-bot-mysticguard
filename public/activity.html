@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GALAXY BOT - Actividad</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;font-family:'Inter','Segoe UI',system-ui,sans-serif}
+  body{background:#07090f;color:#F2F3F5;min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .loader{text-align:center;max-width:420px;padding:0 20px}
+  .ring{width:56px;height:56px;margin:0 auto 20px;border-radius:50%;border:4px solid #2B2D31;border-top-color:#5865F2;animation:sp 1s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  h1{font-size:18px;font-weight:800;letter-spacing:.02em}
+  p{font-size:12px;color:#80848E;margin-top:8px;line-height:1.6}
+  .logo{width:52px;height:52px;border-radius:14px;background:linear-gradient(135deg,#8b5cf6,#5865F2);display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:20px;font-weight:900}
+  a{display:inline-block;margin-top:18px;color:#9BA3F5;font-weight:700;text-decoration:none}
+</style>
+</head>
+<body>
+<div class="loader" id="loader">
+  <div class="logo">✦</div>
+  <div class="ring"></div>
+  <h1>GALAXY BOT DASHBOARD</h1>
+  <p>Conectando con Discord…</p>
+</div>
+
+<script type="module">
+  import { DiscordSDK } from '/vendor/discord-sdk/index.mjs';
+
+  const CLIENT_ID = '1527842890942779454';
+  const loader = document.getElementById('loader');
+
+  function fail(msg, withHelp) {
+    loader.innerHTML =
+      '<h1>No se pudo abrir la actividad</h1>' +
+      '<p>' + (msg || 'Error desconocido') + '</p>' +
+      (withHelp
+        ? '<p style="margin-top:10px;color:#9BA3F5"><b>Cómo abrirla:</b> en Discord, entra a un canal de voz o a un chat y usa el menú <b>Actividades</b> (icono 🎮 / “Iniciar actividad”) → selecciona <b>GALAXY BOT</b>. La actividad no funciona abriendo el enlace en un navegador.</p>'
+        : '') +
+      '<a href="/">Abrir dashboard normal →</a>';
+  }
+
+  function validateFrameParams() {
+    const params = new URLSearchParams(window.location.search);
+    const missing = ['frame_id', 'instance_id', 'platform'].filter((k) => !params.get(k));
+    if (missing.length) {
+      fail('Esta actividad debe abrirse desde dentro de Discord (faltan los parámetros de sesión del iframe).', true);
+      return false;
+    }
+    return true;
+  }
+
+  async function setupDiscordActivity() {
+    try {
+      if (!validateFrameParams()) return;
+
+      const discordSdk = new DiscordSDK(CLIENT_ID);
+      await discordSdk.ready();
+      console.log('SDK listo, guildId:', discordSdk.guildId);
+
+      const { code } = await discordSdk.commands.authorize({ scopes: ['identify', 'guilds'] });
+
+      const url = new URL('/api/auth/callback', window.location.origin);
+      url.searchParams.set('code', code);
+      window.location.href = url.toString();
+    } catch (err) {
+      console.error('[ACTIVITY] error:', err);
+      fail(err && err.message ? err.message : String(err), false);
+    }
+  }
+
+  setupDiscordActivity();
+</script>
+</body>
+</html>

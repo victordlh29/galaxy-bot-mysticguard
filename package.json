@@ -1,0 +1,42 @@
+{
+  "name": "mysticguard-bot",
+  "version": "3.1.0",
+  "description": "Galaxy Bot - Bot de Discord con musica, XP, roles automaticos, anti-spam y dashboard",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "deploy": "node src/bot/deploy-commands.js",
+    "megaadmin": "node src/scripts/create-mega-admin.js",
+    "check": "node --check index.js && node --check src/server/app.js && node --check src/bot/client.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "music",
+    "xp",
+    "dashboard"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@discord/embedded-app-sdk": "^1.9.0",
+    "@discordjs/voice": "^0.19.2",
+    "connect-mongo": "^6.0.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.1",
+    "express-session": "^1.18.1",
+    "ffmpeg-static": "^5.3.0",
+    "helmet": "^8.3.0",
+    "libsodium-wrappers": "^0.7.15",
+    "mongoose": "^8.9.5",
+    "opusscript": "^0.1.0",
+    "play-dl": "^1.9.7",
+    "youtube-dl-exec": "^3.1.12"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

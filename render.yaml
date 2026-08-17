@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: galaxy-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /
+    envVars:
+      - key: PUBLIC_URL
+        value: https://galaxy-bot.onrender.com
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: CLIENT_ID
+        sync: false
+      - key: CLIENT_SECRET
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: HEARTBEAT_SECRET
+        sync: false
