@@ -102,6 +102,20 @@ async function handleCommand(interaction) {
   try {
     let embed;
     const musicControlCmds = ['play', 'skip', 'stop', 'pause', 'resume', 'volume', 'loop', 'autoplay', 'filter', 'queue', 'nowplaying'];
+    if (musicControlCmds.includes(commandName) && Array.isArray(config.music.ignoreChannels) && config.music.ignoreChannels.includes(interaction.channelId)) {
+      let hint = '';
+      const musicChannel = config.music.commandChannelId && guild.channels.cache.get(config.music.commandChannelId);
+      if (musicChannel) {
+        hint = `Usa ${musicChannel} o el chat del canal de voz en el que estés.`;
+      } else if (member.voice.channel) {
+        hint = `Usa el chat del canal de voz **${member.voice.channel.name}**.`;
+      } else {
+        hint = 'Únete a un canal de voz y usa su chat.';
+      }
+      const denied = await interaction.editReply({ content: `Los comandos de música están desactivados en este canal. ${hint}`, fetchReply: true }).catch(() => null);
+      if (denied) setTimeout(() => denied.delete().catch(() => {}), 5000);
+      return;
+    }
     if (musicControlCmds.includes(commandName) && !canControlMusic(member, config)) {
       return interaction.editReply('Solo el rol de control de música (sonidistas) o un administrador puede usar este comando.');
     }

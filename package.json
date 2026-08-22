@@ -4,7 +4,7 @@
   "description": "Galaxy Bot - Bot de Discord con musica, XP, roles automaticos, anti-spam y dashboard",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node src/scripts/ensure-deps.js && node index.js",
     "dev": "node --watch index.js",
     "deploy": "node src/bot/deploy-commands.js",
     "megaadmin": "node src/scripts/create-mega-admin.js",
@@ -33,7 +33,6 @@
     "libsodium-wrappers": "^0.7.15",
     "mongoose": "^8.9.5",
     "opusscript": "0.1.1",
-    "play-dl": "^1.9.7",
     "youtube-dl-exec": "^3.1.12"
   },
   "engines": {

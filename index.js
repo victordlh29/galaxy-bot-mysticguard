@@ -1,4 +1,8 @@
 require('dotenv').config();
+// Bootstrap de dependencias: corre SIEMPRE (el panel de hosting lanza `node index.js`
+// directamente e ignora npm start), instala lo que falte antes de cargar el resto.
+// Va tras dotenv para que el diagnóstico de entorno vea también el .env local.
+require('./src/scripts/ensure-deps').run();
 const fs = require('fs');
 const path = require('path');
 const mongoose = require('mongoose');

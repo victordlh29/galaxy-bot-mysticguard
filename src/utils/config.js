@@ -46,7 +46,7 @@ const DEFAULT_CONFIG = {
       warnMessage: 'Hey {user}, evita el flood de mensajes en **{server}**.'
     }
   },
-  music: { enabled: true, volume: 40, commandChannelId: '', controlRoleId: '' },
+  music: { enabled: true, volume: 40, commandChannelId: '', controlRoleId: '', ignoreChannels: [] },
   logs: { enabled: true, channelId: '' },
   adminRoles: []
 };
@@ -65,6 +65,7 @@ async function getConfig(guildId) {
     } else {
       if (typeof config.music.volume !== 'number') sets['music.volume'] = DEFAULT_CONFIG.music.volume;
       if (typeof config.music.controlRoleId !== 'string') sets['music.controlRoleId'] = '';
+      if (!Array.isArray(config.music.ignoreChannels)) sets['music.ignoreChannels'] = [];
       if (!Array.isArray(config.music.eq) || config.music.eq.length !== 10) {
         sets['music.eq'] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
       }

@@ -33,7 +33,7 @@ El usuario se comunica en **español** — responder siempre en español.
 - **La BD es la fuente de verdad** del volumen (`guildconfigs.music.volume`). `/api/music/status` devuelve el de BD y resincroniza la cola con `setVolume`.
 - Escala: `linearVolume(q) = (q.volume/100)^1.660964 × volumeScale` — usada en AMBAS rutas (`playNext` y `setVolume`) porque el slider aplica `setVolumeLogarithmic` (percepción). EQ/bassboost no se suman encima del volumen (`volumeScale`).
 - `getQueue(guildId, volume)` resincroniza volumen si difiere del guardado; `DEFAULT_VOLUME=40`, `MAX_VOLUME=100`. Volumen 0 válido (usar `Number.isFinite`, nunca `|| 40`).
-- EQ de 10 bandas persistente (`music.eq`), `replayCurrent` al cambiar filtro/EQ, tolerancia `cutShort` de 30s (el final natural de YouTube parece corte), cadena de reintentos por bot-check (cookies → sin cookies → cookies-navegador android/tv/ios), `--js-runtimes node`, `--retries 5`.
+- EQ de 10 bandas persistente (`music.eq`), `replayCurrent` al cambiar filtro/EQ, tolerancia `cutShort` de 30s (el final natural de YouTube parece corte), cadena de reintentos por bot-check (cookies → sin cookies → cookies-navegador × clientes `android/tv/ios/web_embedded/tv_embedded/android_vr` = 35 intentos; formato `140/bestaudio/best`; `resolveCookieFile` materializa YT_COOKIES en temp), `YT_PROXY` (--proxy residencial para datacenters), `--js-runtimes node`, `--retries 5`.
 
 ## Sesiones
 - express-session + connect-mongo, cookie `maxAge` **7 días**, sin `rolling` → expira 7 días tras el login aunque haya actividad. El doc de `sessions` usa el `cookie.expires` (fallback 14 días de connect-mongo) con TTL index.
@@ -45,4 +45,4 @@ El usuario se comunica en **español** — responder siempre en español.
 - Campos vacíos reales = funciones opcionales sin elegir (ej. `music.commandChannelId` = comandos en cualquier canal), NO son errores.
 
 ## Hosting
-- justrunmy.app (24/7, HTTPS para Activity de Discord). **PENDIENTE**: redesplegar el código actual (lo desplegado es anterior a los fixes de 12-13/08). Detalles en `PENDIENTES.md` pendiente 1.
+- justrunmy.app (24/7, HTTPS para Activity de Discord). **PENDIENTE**: redesplegar con `deploy-justrunmy-v4.zip` (versión yt-dlp restaurada tras abandonar Lavalink). Checklist en `PENDIENTES.md` pendiente 1b.

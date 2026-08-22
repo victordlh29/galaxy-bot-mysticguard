@@ -98,6 +98,7 @@ const guildConfigSchema = new Schema(
       volume: { type: Number, default: 40, min: 0, max: 100 },
       commandChannelId: { type: String, default: '' },
       controlRoleId: { type: String, default: '' },
+      ignoreChannels: { type: [String], default: [] },
       eq: { type: [Number], default: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
     },
     logs: {

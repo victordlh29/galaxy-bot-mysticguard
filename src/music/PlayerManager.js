@@ -6,9 +6,9 @@ const {
   AudioPlayerStatus,
   StreamType
 } = require('@discordjs/voice');
-const playdl = require('play-dl');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const ffmpegStatic = require('ffmpeg-static');
 const { YOUTUBE_DL_PATH } = require('youtube-dl-exec').constants;
@@ -20,9 +20,28 @@ const COOKIES_FILE = path.join(__dirname, '..', '..', 'cookies.txt');
 const PIPELINE_TIMEOUT_MS = Number(process.env.MUSIC_PIPELINE_TIMEOUT_MS) || 60000;
 let browsersUsable = null;
 
+// YT_COOKIES puede ser una RUTA o el CONTENIDO del cookies.txt (paneles como justrunmy).
+// Si es contenido multilínea se materializa en un archivo temporal para pasarle --cookies a yt-dlp.
+function resolveCookieFile() {
+  const env = process.env.YT_COOKIES;
+  if (env && env.trim()) {
+    let content = env.replace(/\r\n/g, '\n').replace(/\\n/g, '\n');
+    if (/^\s*#/.test(content) || content.includes('\n')) {
+      try {
+        const tmp = path.join(os.tmpdir(), `yt_cookies_${process.pid}.txt`);
+        fs.writeFileSync(tmp, content.endsWith('\n') ? content : content + '\n', 'utf8');
+        return tmp;
+      } catch (_) {}
+    }
+    return env;
+  }
+  return fs.existsSync(COOKIES_FILE) ? COOKIES_FILE : null;
+}
+
 function isRetryableYtError(err) {
   const m = err && err.message ? err.message : '';
   return /Sign in to confirm|Sign in to continue|not a bot|Login required|HTTP Error 4(01|03)/i.test(m)
+    || /Requested format is not available/i.test(m)
     || /cook|decrypt|database|profile/i.test(m)
     || /Timeout: sin datos de audio/i.test(m);
 }
@@ -172,47 +191,132 @@ class PlayerManager {
     q.player.stop(true);
   }
 
+  isPlaylistUrl(u) {
+    return /youtube\.com\/playlist\//i.test(u) || (/list=/i.test(u) && !/[?&]v=/i.test(u));
+  }
+
+  trackFromInfo(v, fallbackUrl) {
+    const thumbs = Array.isArray(v.thumbnails) ? v.thumbnails.filter((t) => t && t.url) : [];
+    return {
+      type: 'youtube',
+      url: v.webpage_url || fallbackUrl,
+      title: v.title || fallbackUrl,
+      author: v.uploader || null,
+      duration: typeof v.duration === 'number' ? Math.round(v.duration) : null,
+      thumbnail: thumbs.length ? thumbs[thumbs.length - 1].url : null
+    };
+  }
+
+  // Metadatos vía yt-dlp (misma herramienta que el stream, sin dependencias frágiles tipo play-dl)
+  runYtDlpJson(fullArgs) {
+    return new Promise((resolve, reject) => {
+      let p;
+      try {
+        p = spawn(YOUTUBE_DL_PATH, fullArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      } catch (err) {
+        return reject(err);
+      }
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => {
+        try { if (!p.killed) p.kill('SIGTERM'); } catch (_) {}
+        reject(new Error('Timeout: yt-dlp no devolvió metadatos'));
+      }, 30000);
+      p.stdout.on('data', (d) => { out += d.toString(); });
+      p.stderr.on('data', (d) => { err = (err + d.toString()).slice(-1000); });
+      p.on('error', (e) => { clearTimeout(timer); reject(e); });
+      p.on('exit', (code) => {
+        clearTimeout(timer);
+        const trimmedOut = out.trim();
+        if (code !== 0 || !trimmedOut) {
+          return reject(new Error(`yt-dlp (metadatos) salió con código ${code}: ${(err || trimmedOut).slice(0, 200)}`));
+        }
+        try {
+          resolve(JSON.parse(trimmedOut));
+        } catch (_) {
+          reject(new Error('yt-dlp devolvió JSON inválido'));
+        }
+      });
+    });
+  }
+
+  // Variantes de autenticación compartidas por audio y metadatos:
+  // limpio-primero → cookies → cookies-de-navegador, cada una × clientes.
+  buildAuthVariants() {
+    const variants = [];
+    const clients = [null, 'android', 'tv', 'ios', 'web_embedded', 'tv_embedded', 'android_vr'];
+    const cookieFile = resolveCookieFile();
+    const pushClient = (label, flags) => {
+      for (const client of clients) {
+        const extra = client ? ['--extractor-args', `youtube:player_client=${client}`] : [];
+        variants.push({ label: client ? `${label} client=${client}` : label, flags: [...flags, ...extra] });
+      }
+    };
+    pushClient('sin cookies', []);
+    if (cookieFile) pushClient(`cookies:${cookieFile}`, ['--cookies', cookieFile]);
+    if (browsersUsable !== false) {
+      for (const browser of this.detectBrowsers()) {
+        pushClient(`cookies-from-browser:${browser}`, ['--cookies-from-browser', browser]);
+      }
+    }
+    return variants;
+  }
+
+  // Igual que createStream pero para metadatos JSON: itera variantes de auth
+  // (cap 10 ≈ 30s peor caso; los bot-check fallan en ~1-3s).
+  async runYtDlpJsonRetry(extraArgs) {
+    const base = ['-J', '--no-warnings', '--quiet', '--socket-timeout', '20', '--js-runtimes', 'node'];
+    if (process.env.YT_PROXY) base.push('--proxy', process.env.YT_PROXY);
+    const variants = this.buildAuthVariants().slice(0, 10);
+    let lastErr;
+    let botCheck;
+    for (const v of variants) {
+      try {
+        return await this.runYtDlpJson([...base, ...v.flags, ...extraArgs]);
+      } catch (err) {
+        lastErr = err;
+        if (!isRetryableYtError(err)) throw err;
+        if (BOT_CHECK_RE.test(err.message)) botCheck = err;
+        console.warn(`[MUSIC] metadatos fallo con ${v.label}: ${String(err.message).slice(0, 100)}`);
+      }
+    }
+    throw botCheck || lastErr;
+  }
+
   async resolveQuery(query) {
     const trimmed = query.trim();
     try {
-      if (trimmed.startsWith('https://') || trimmed.startsWith('http://')) {
-        if (playdl.yt_validate(trimmed) === 'playlist') {
-          const pl = await playdl.playlist_info(trimmed);
-          const tracks = (await pl.all_videos()).map((v) => ({
-            type: 'youtube',
-            url: v.url,
-            title: v.title,
-            duration: v.durationInSec,
-            thumbnail: v.thumbnails && v.thumbnails[0] ? v.thumbnails[0].url : null
-          }));
+      if (/^https?:\/\//i.test(trimmed)) {
+        if (this.isPlaylistUrl(trimmed)) {
+          const data = await this.runYtDlpJsonRetry(['--flat-playlist', trimmed]);
+          const entries = data && Array.isArray(data.entries) ? data.entries : [];
+          const tracks = [];
+          for (const e of entries) {
+            if (!e) continue;
+            const url = e.url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : null);
+            if (!url) continue;
+            tracks.push({
+              type: 'youtube',
+              url,
+              title: e.title || url,
+              author: e.uploader || null,
+              duration: typeof e.duration === 'number' ? Math.round(e.duration) : null,
+              thumbnail: Array.isArray(e.thumbnails) && e.thumbnails.length && e.thumbnails[e.thumbnails.length - 1].url ? e.thumbnails[e.thumbnails.length - 1].url : null
+            });
+          }
           return tracks;
         }
-        const info = await playdl.video_info(trimmed).catch(() => null);
-        if (info && info.video_details) {
-          const v = info.video_details;
-          return [
-            {
-              type: 'youtube',
-              url: v.url || trimmed,
-              title: v.title,
-              duration: v.durationInSec,
-              thumbnail: v.thumbnails && v.thumbnails[0] ? v.thumbnails[0].url : null
-            }
-          ];
+        try {
+          const info = await this.runYtDlpJsonRetry(['--no-playlist', trimmed]);
+          return [this.trackFromInfo(info, trimmed)];
+        } catch (_) {
+          return [{ type: 'youtube', url: trimmed, title: trimmed, duration: null, thumbnail: null }];
         }
-        return [{ type: 'youtube', url: trimmed, title: trimmed, duration: null, thumbnail: null }];
       }
-      const results = await playdl.search(trimmed, { limit: 1, source: { youtube: 'video' } });
-      if (!results.length) return [];
-      return [
-        {
-          type: 'youtube',
-          url: results[0].url,
-          title: results[0].title,
-          duration: results[0].durationInSec,
-          thumbnail: results[0].thumbnails && results[0].thumbnails[0] ? results[0].thumbnails[0].url : null
-        }
-      ];
+      const results = await this.runYtDlpJsonRetry([`ytsearch1:${trimmed}`]);
+      const entry = results && Array.isArray(results.entries) ? results.entries[0] : results;
+      if (!entry) return [];
+      return [this.trackFromInfo(entry, null)];
     } catch (err) {
       console.error('[MUSIC] error resolviendo query:', err.message);
       return [];
@@ -243,9 +347,9 @@ class PlayerManager {
     if (!q.tracks.length) {
       if (q.loop && q.current) {
         q.tracks.push(q.current);
-      } else if (q.autoplay && q.current && q.current.url) {
-        try {
-          const related = await this.getRelated(q.current.url);
+        } else if (q.autoplay && q.current && q.current.url) {
+          try {
+            const related = await this.getRelated(q.current);
           if (related) q.tracks.push(related);
         } catch (_) {}
         if (!q.tracks.length) return this.finishQueue(guildId);
@@ -298,20 +402,27 @@ class PlayerManager {
     return null;
   }
 
-  async getRelated(url) {
+  async getRelated(track) {
     try {
-      const info = await playdl.video_info(url);
-      const rel = info.related_videos;
-      if (!rel || !rel.length) return null;
-      const v = rel[0];
-      return {
-        type: 'youtube',
-        url: v.url,
-        title: v.title,
-        duration: v.durationInSec || null,
-        thumbnail: null
-      };
-    } catch (err) {
+      const qy = [track && track.author, track && track.title].filter(Boolean).join(' ').trim();
+      if (!qy) return null;
+      const data = await this.runYtDlpJsonRetry(['--flat-playlist', `ytsearch3:${qy}`]);
+      const entries = data && Array.isArray(data.entries) ? data.entries : [];
+      for (const e of entries) {
+        if (!e) continue;
+        const url = e.url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : null);
+        if (!url || (track.url && url === track.url)) continue;
+        return {
+          type: 'youtube',
+          url,
+          title: e.title || 'Video',
+          author: e.uploader || null,
+          duration: typeof e.duration === 'number' ? Math.round(e.duration) : null,
+          thumbnail: null
+        };
+      }
+      return null;
+    } catch (_) {
       return null;
     }
   }
@@ -346,32 +457,15 @@ class PlayerManager {
 
   buildYtDlpAttempts(url) {
     const base = [
-      '-f', '140/bestaudio', '-o', '-', '--no-playlist', '--quiet', '--no-warnings',
+      '-f', '140/bestaudio/best', '-o', '-', '--no-playlist', '--quiet', '--no-warnings',
       '--retries', '5', '--retry-sleep', '3', '--fragment-retries', '5',
       '--socket-timeout', '20', '--http-chunk-size', '64K',
       '--js-runtimes', 'node'
     ];
-    const attempts = [];
-    const cookieFile = process.env.YT_COOKIES || (fs.existsSync(COOKIES_FILE) ? COOKIES_FILE : null);
-    const clients = [null, 'android', 'tv', 'ios'];
-    const pushClient = (label, args) => {
-      for (const client of clients) {
-        attempts.push({
-          label: client ? `${label} client=${client}` : label,
-          args: client ? [...args, '--extractor-args', `youtube:player_client=${client}`, url] : [...args, url]
-        });
-      }
-    };
-    if (cookieFile) {
-      pushClient(`cookies:${cookieFile}`, [...base, '--cookies', cookieFile]);
-    }
-    pushClient('sin cookies', [...base]);
-    if (browsersUsable !== false) {
-      for (const browser of this.detectBrowsers()) {
-        pushClient(`cookies-from-browser:${browser}`, [...base, '--cookies-from-browser', browser]);
-      }
-    }
-    return attempts;
+    if (process.env.YT_PROXY) base.push('--proxy', process.env.YT_PROXY);
+    // Orden limpio-primero (estilo STAN_PLAYA): el intento sin auth va primero;
+    // cookies y cookies-de-navegador quedan como escalones de respaldo.
+    return this.buildAuthVariants().map((v) => ({ label: v.label, args: [...base, ...v.flags, url] }));
   }
 
   detectBrowsers() {
@@ -437,6 +531,7 @@ class PlayerManager {
             '-probesize', '32',
             '-i', '-',
             ...(filterArgs.length ? ['-af', filterArgs.join(',')] : []),
+            '-vn',
             '-f', 's16le',
             '-ar', '48000',
             '-ac', '2',

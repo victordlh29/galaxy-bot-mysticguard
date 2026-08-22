@@ -6,4 +6,5 @@ bot.log
 bot.err.log
 crash.log
 *.log
+*.zip
 .DS_Store
