@@ -76,6 +76,12 @@ IMPORTANTE: NO tocar el archivo `.env`. NO tocar `galaxy-dashboard.html` (es sol
 
 ## Cambios hechos hasta ahora
 
+### Backup en GitHub: repo privado `galaxy-bot-mysticguard` (22/08/2026)
+- **Repo privado creado y sincronizado**: https://github.com/victordlh29/galaxy-bot-mysticguard — respaldo de código (NO es hosting: GitHub Actions/serverless tipo Netlify descartados para el bot — procesos 24/7 imposibles, IPs de datacenter igual de quemadas para YouTube).
+- Commit `55aeeb4`: todo el revert de Lavalink + fixes pendientes (PlayerManager yt-dlp/ffmpeg, `ensure-deps.js`, cadena de reintentos de metadatos con cookies, diag de entorno, responsive, seguridad). Rama `master` trackeando `origin/master`.
+- **Seguridad verificada antes del push**: historial sin `.env` ni `cookies.txt`; `.env.example` solo placeholders; escaneo del diff sin secretos; `.gitignore` ahora también excluye `*.zip` (los deploy zips no van al backup).
+- git config email local: `victordlh29@users.noreply.github.com` (noreply, privacidad).
+
 ### Revert de Lavalink: reproductor yt-dlp→ffmpeg restaurado + fixes 17/08 (21/08/2026, noche)
 - **Decisión**: Lavalink abandonado definitivamente — los nodos públicos (kasawa) y el propio (Render) sufren throttles/bloqueos intermitentes de YouTube y no son configurables. Se vuelve al pipeline propio `yt-dlp.exe → ffmpeg-static → PCM s16le 48 kHz` con `@discordjs/voice`, que funciona verificado desde IP residencial. Referencia usada: `C:\Users\Matrix\Desktop\mia\STAN_PLAYA_SEGUNDO` (mismo pipeline, sin cookies/EQ; su único aporte real era pre-buffer+flags que NUESTRO player ya tenía).
 - **`src/music/PlayerManager.js` restaurado desde git HEAD (16/08)** — conserva EQ de 10 bandas por `-af`, filtros, volumen BD como fuente de verdad (`linearVolume`), autoplay, loop, cola en memoria, tolerancia cutShort 30s, warnings para el dashboard.
