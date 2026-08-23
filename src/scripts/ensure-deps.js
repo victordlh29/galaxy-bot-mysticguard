@@ -3,7 +3,7 @@
 // un zip a justrunmy y que quede el node_modules de una versión anterior).
 const { spawnSync } = require('child_process');
 const path = require('path');
-const { existsSync, mkdirSync, chmodSync, renameSync, createWriteStream } = require('fs');
+const { existsSync, mkdirSync, chmodSync, renameSync, createWriteStream, statSync, rmSync } = require('fs');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 
@@ -47,11 +47,41 @@ function runInstall(args) {
 // yt-dlp SIEMPRE standalone en Linux: el zipapp depende de la versión de Python del host y
 // ha dado Tracebacks arbitrarios (wispbyte: python3.9 explota al ejecutarlo). El binario
 // standalone elimina toda dependencia de Python.
+const MIN_STANDALONE_BYTES = 20 * 1024 * 1024; // el binario real pesa ~30 MB; menos = truncado/corrupto
+
+// PyInstaller (standalone) extrae a /tmp/_MEIxxxx en cada ejecución y borra al salir;
+// si el proceso muere antes, quedan restos que llenan el disco de contenedores pequeños
+// y rompen la siguiente extracción ("Failed to extract ... decompression resulted in -1").
+function limpiarMeiStale() {
+  try {
+    const tmp = require('os').tmpdir();
+    const items = require('fs').readdirSync(tmp).filter((d) => d.startsWith('_MEI'));
+    let freed = 0;
+    for (const d of items) {
+      try {
+        const full = path.join(tmp, d);
+        freed += require('fs').statSync(full).size;
+        require('fs').rmSync(full, { recursive: true, force: true });
+      } catch (_) {}
+    }
+    if (items.length) console.log(`[BOOT] Limpiados ${items.length} residuos _MEI de yt-dlp en ${tmp}`);
+  } catch (_) {}
+}
+
 async function ensureYtDlpRuntime() {
   if (process.platform === 'win32') return;
+  limpiarMeiStale();
   const binDir = path.join(ROOT, 'node_modules', 'youtube-dl-exec', 'bin');
   const target = path.join(binDir, 'yt-dlp');
   const marker = path.join(binDir, '.standalone-ok');
+  // Binario truncado/corrupto (descarga interrumpida): forzar re-descarga.
+  try {
+    if (existsSync(target) && statSync(target).size < MIN_STANDALONE_BYTES) {
+      console.log('[BOOT] yt-dlp standalone parece corrupto (tamaño anómalo); re-descargando...');
+      rmSync(target, { force: true });
+      rmSync(marker, { force: true });
+    }
+  } catch (_) {}
   if (existsSync(marker)) {
     console.log('[BOOT] yt-dlp standalone ya instalado');
     return;
