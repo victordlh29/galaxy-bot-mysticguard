@@ -44,12 +44,9 @@ function runInstall(args) {
   });
 }
 
-function hasPython3() {
-  return spawnSync('python3', ['--version']).status === 0;
-}
-
-// yt-dlp necesita ser zipapp+python3 O binario standalone. Si falta el archivo
-// (postinstall fallido en el hosting) o no hay python3, instala el standalone.
+// yt-dlp SIEMPRE standalone en Linux: el zipapp depende de la versión de Python del host y
+// ha dado Tracebacks arbitrarios (wispbyte: python3.9 explota al ejecutarlo). El binario
+// standalone elimina toda dependencia de Python.
 async function ensureYtDlpRuntime() {
   if (process.platform === 'win32') return;
   const binDir = path.join(ROOT, 'node_modules', 'youtube-dl-exec', 'bin');
@@ -59,8 +56,7 @@ async function ensureYtDlpRuntime() {
     console.log('[BOOT] yt-dlp standalone ya instalado');
     return;
   }
-  if (existsSync(target) && hasPython3()) return; // zipapp funcional
-  console.log('[BOOT] python3/yt-dlp no disponible; descargando yt-dlp standalone (~30 MB)...');
+  console.log('[BOOT] Descargando yt-dlp standalone (~30 MB, sin depender de Python)...');
   const res = await fetch(YT_DLP_LINUX_URL);
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} descargando yt-dlp_linux`);
   mkdirSync(binDir, { recursive: true });
