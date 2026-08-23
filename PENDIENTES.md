@@ -91,6 +91,7 @@ IMPORTANTE: NO tocar el archivo `.env`. NO tocar `galaxy-dashboard.html` (es sol
 - **CONCLUSIÓN PROBADA EN 2 PROVEEDORES**: todo hosting gratuito de datacenter está bloqueado por YouTube para música. Las únicas vías reales quedan: (a) `YT_PROXY` residencial en cualquier host, (b) correr el bot desde una IP residencial (casa) con túnel HTTPS si se quiere dashboard/Activity.
 - Hallazgo adicional: `cookies.txt` raíz local es una exportación vieja incompleta (1666 chars, solo `__Secure-1PSID`; la buena de justrunmy tenía 3669 chars con SID/HSID/SAPISID...) → RE-EXPORTAR con "Get cookies.txt LOCALLY" y actualizar el secret `YT_COOKIES` y/o el panel.
 - Estado actual: justrunmy PARADO (decisión del usuario), experimento Actions activo como prueba. Para música real: decidir proxy residencial vs casa+Cloudflare Tunnel.
+- **CIERRE DEL EXPERIMENTO (23/08)**: workflow eliminado (`7e7dbe9`) y repo devuelto a PRIVADO — queda como backup puro. El run en curso muere solo al acabar; sin cron ya no se relanza. Los secrets quedan guardados pero sin uso. Siguiente frente: probar el Galaxy Bot (v5, con opus nativo) en wispbyte si su IP no está quemada.
 - Backup sincronizado en GitHub: commits `55aeeb4` (revert Lavalink completo), `2ac91ce`, `a60d355`, `9f073ea` (workflow).
 
 ### Backup en GitHub: repo privado→público `galaxy-bot-mysticguard` (22-23/08/2026)
