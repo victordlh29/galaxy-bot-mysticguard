@@ -83,6 +83,7 @@ IMPORTANTE: NO tocar el archivo `.env`. NO tocar `galaxy-dashboard.html` (es sol
 - OJO: `^0.10.1` NO existe (la última es 0.10.0); npm con un rango inexistente llegó a resolver un alias a `npm:null` — usar siempre `^0.10.0`.
 - **`ensure-deps.js`**: nuevo `[BOOT] DIAG Opus` que loguea qué codificador está activo (nativo vs opusscript).
 - **`deploy-justrunmy-v5.zip`** regenerado (224 entradas, rutas `/`, sin vacíos, incluye package.json+lock nuevos) — sirve para justrunmy Y para probar wispbyte con este bot más ligero que STAN_PLAYA (que arrastra Prisma+TS+Redis y por eso revienta RAM/CPU).
+- **Wispbyte (23/08)**: panel Pterodactyl, despliegue por ZIP, arranque `node index.js` directo (nuestro bootstrap en index.js cubre deps/yt-dlp/diag). `index.js` ahora acepta `SERVER_PORT` como fallback de `PORT` (`86dc6c7`) porque estos paneles inyectan el puerto así. Pendiente: subir zip v5 + env vars y probar si su IP reproduce YouTube.
 
 ### Experimento GitHub Actions como hosting (23/08/2026) — funciona el bot, BLOQUEADO por YouTube
 - Repo `galaxy-bot-mysticguard` hecho **público** (minutos ilimitados), secrets 8/8 seteados cifrados vía API (DISCORD_TOKEN, MONGODB_URI, SESSION_SECRET, CLIENT_ID/SECRET, OWNER_ID, YT_COOKIES desde cookies.txt, HEARTBEAT_SECRET).
