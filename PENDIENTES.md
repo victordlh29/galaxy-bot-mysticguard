@@ -76,7 +76,16 @@ IMPORTANTE: NO tocar el archivo `.env`. NO tocar `galaxy-dashboard.html` (es sol
 
 ## Cambios hechos hasta ahora
 
-### Backup en GitHub: repo privado `galaxy-bot-mysticguard` (22/08/2026)
+### Experimento GitHub Actions como hosting (23/08/2026) — funciona el bot, BLOQUEADO por YouTube
+- Repo `galaxy-bot-mysticguard` hecho **público** (minutos ilimitados), secrets 8/8 seteados cifrados vía API (DISCORD_TOKEN, MONGODB_URI, SESSION_SECRET, CLIENT_ID/SECRET, OWNER_ID, YT_COOKIES desde cookies.txt, HEARTBEAT_SECRET).
+- `.github/workflows/discord-bot.yml`: job único ~6h (`timeout-minutes: 350`) + cron cada 6h + concurrency group (mejor que el patrón cron-cada-5-min de las guías: cortes 1 vez/hora y media en vez de cada 5 min, la música no muere a mitad de canción por diseño).
+- Resultado: bot ONLINE perfecto (Mongo, 17 comandos, gateway OK) pero **YouTube bloquea la IP de salida del runner (172.184.210.214, Akamai/datacenter)**: "Sign in to confirm you're not a bot" en TODOS los clientes, con y sin cookies. Mismo resultado que justrunmy (152.53.157.177 Netcup).
+- **CONCLUSIÓN PROBADA EN 2 PROVEEDORES**: todo hosting gratuito de datacenter está bloqueado por YouTube para música. Las únicas vías reales quedan: (a) `YT_PROXY` residencial en cualquier host, (b) correr el bot desde una IP residencial (casa) con túnel HTTPS si se quiere dashboard/Activity.
+- Hallazgo adicional: `cookies.txt` raíz local es una exportación vieja incompleta (1666 chars, solo `__Secure-1PSID`; la buena de justrunmy tenía 3669 chars con SID/HSID/SAPISID...) → RE-EXPORTAR con "Get cookies.txt LOCALLY" y actualizar el secret `YT_COOKIES` y/o el panel.
+- Estado actual: justrunmy PARADO (decisión del usuario), experimento Actions activo como prueba. Para música real: decidir proxy residencial vs casa+Cloudflare Tunnel.
+- Backup sincronizado en GitHub: commits `55aeeb4` (revert Lavalink completo), `2ac91ce`, `a60d355`, `9f073ea` (workflow).
+
+### Backup en GitHub: repo privado→público `galaxy-bot-mysticguard` (22-23/08/2026)
 - **Repo privado creado y sincronizado**: https://github.com/victordlh29/galaxy-bot-mysticguard — respaldo de código (NO es hosting: GitHub Actions/serverless tipo Netlify descartados para el bot — procesos 24/7 imposibles, IPs de datacenter igual de quemadas para YouTube).
 - Commit `55aeeb4`: todo el revert de Lavalink + fixes pendientes (PlayerManager yt-dlp/ffmpeg, `ensure-deps.js`, cadena de reintentos de metadatos con cookies, diag de entorno, responsive, seguridad). Rama `master` trackeando `origin/master`.
 - **Seguridad verificada antes del push**: historial sin `.env` ni `cookies.txt`; `.env.example` solo placeholders; escaneo del diff sin secretos; `.gitignore` ahora también excluye `*.zip` (los deploy zips no van al backup).
