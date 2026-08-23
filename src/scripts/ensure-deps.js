@@ -112,8 +112,20 @@ async function logPublicIp() {
   console.log('[BOOT] DIAG IP pública: no se pudo consultar');
 }
 
+// Codificador Opus: @discordjs/voice prefiere el nativo (@discordjs/opus, C++) sobre
+// opusscript (JS puro, ~10x más CPU). En hosts con límite de CPU marca la diferencia.
+function diagOpus() {
+  try {
+    const v = require('@discordjs/opus/package.json').version;
+    console.log(`[BOOT] DIAG Opus: NATIVO (@discordjs/opus ${v}) — CPU de música reducida`);
+  } catch (_) {
+    console.log('[BOOT] DIAG Opus: opusscript (JS, más CPU) — si el host limita CPU, instalar @discordjs/opus');
+  }
+}
+
 function run() {
   diagEnv();
+  diagOpus();
   setTimeout(() => { logPublicIp().catch(() => {}); }, 2000).unref();
   const missing = missingNow();
   if (!missing.length) {

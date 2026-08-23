@@ -76,6 +76,14 @@ IMPORTANTE: NO tocar el archivo `.env`. NO tocar `galaxy-dashboard.html` (es sol
 
 ## Cambios hechos hasta ahora
 
+### Optimización CPU para hostings con límite: opus nativo (23/08/2026)
+- **Problema**: wispbyte (free) suspende el bot de STAN_PLAYA por uso de CPU. El gran consumidor en reproducción es `opusscript` (codifica Opus en JS puro, ~un núcleo entero); `@discordjs/opus` nativo (C++) usa ~10x menos.
+- **`@discordjs/opus ^0.10.0` añadido como `optionalDependencies`** (NO en dependencies): si el hosting tiene prebuild o compilador → se usa nativo; si falla la instalación → npm sigue y `opusscript` actúa de fallback sin romper el arranque. `@discordjs/voice` lo elige automáticamente si está presente.
+- **Prebuilds verificados**: Linux x64 glibc existe para Node 18/20/22 (ABI 108/115/127, glibc 2.31 y 2.35). El Dockerfile (node:22-slim) lo instala sin compilar. En Node >=24 NO hay prebuild aún (404 para ABI 137): local Windows con Node 24 lo salta silenciosamente — comportamiento esperado, no es error.
+- OJO: `^0.10.1` NO existe (la última es 0.10.0); npm con un rango inexistente llegó a resolver un alias a `npm:null` — usar siempre `^0.10.0`.
+- **`ensure-deps.js`**: nuevo `[BOOT] DIAG Opus` que loguea qué codificador está activo (nativo vs opusscript).
+- **`deploy-justrunmy-v5.zip`** regenerado (224 entradas, rutas `/`, sin vacíos, incluye package.json+lock nuevos) — sirve para justrunmy Y para probar wispbyte con este bot más ligero que STAN_PLAYA (que arrastra Prisma+TS+Redis y por eso revienta RAM/CPU).
+
 ### Experimento GitHub Actions como hosting (23/08/2026) — funciona el bot, BLOQUEADO por YouTube
 - Repo `galaxy-bot-mysticguard` hecho **público** (minutos ilimitados), secrets 8/8 seteados cifrados vía API (DISCORD_TOKEN, MONGODB_URI, SESSION_SECRET, CLIENT_ID/SECRET, OWNER_ID, YT_COOKIES desde cookies.txt, HEARTBEAT_SECRET).
 - `.github/workflows/discord-bot.yml`: job único ~6h (`timeout-minutes: 350`) + cron cada 6h + concurrency group (mejor que el patrón cron-cada-5-min de las guías: cortes 1 vez/hora y media en vez de cada 5 min, la música no muere a mitad de canción por diseño).
