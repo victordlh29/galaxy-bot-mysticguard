@@ -54,7 +54,7 @@ async function start() {
   registerEvents();
 
   const app = createApp({ client });
-  const port = process.env.PORT || 3000;
+  const port = process.env.PORT || process.env.SERVER_PORT || 3000;
   const base = process.env.PUBLIC_URL || process.env.DASHBOARD_URL || `http://localhost:${port}`;
   app.listen(port, () => {
     console.log(`[HTTP] Dashboard en ${base}`);
