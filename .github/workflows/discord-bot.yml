@@ -1,0 +1,40 @@
+name: Discord Bot 24/7
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7 */6 * * *"
+
+concurrency:
+  group: galaxy-bot
+  cancel-in-progress: false
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Dependencias
+        run: npm ci --omit=dev || npm install --omit=dev
+
+      - name: Arrancar bot
+        run: node index.js
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+          HEARTBEAT_SECRET: ${{ secrets.HEARTBEAT_SECRET }}
+          DEBUG_MUSIC: "true"
