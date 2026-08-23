@@ -4,6 +4,41 @@
 const { spawnSync } = require('child_process');
 const path = require('path');
 const { existsSync, mkdirSync, chmodSync, renameSync, createWriteStream, statSync, rmSync } = require('fs');
+const { createHash } = require('crypto');
+
+async function sha256File(p) {
+  return new Promise((resolve, reject) => {
+    const h = createHash('sha256');
+    require('fs').createReadStream(p)
+      .on('data', (c) => h.update(c))
+      .on('end', () => resolve(h.digest('hex')))
+      .on('error', reject);
+  });
+}
+
+// Verifica el binario contra los SHA2-256SUMS oficiales de la release.
+// Una descarga corrompida a mitad de archivo pasa el chequeo de tamaño pero
+// produce justo este fallo: "decompression resulted in return code -1".
+async function verificarShaStandalone(tmpPath) {
+  try {
+    const r = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS', { signal: AbortSignal.timeout(20000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const txt = await r.text();
+    const line = txt.split('\n').find((l) => l.trim().split(/\s+/)[1] === 'yt-dlp_linux');
+    if (!line) throw new Error('hash no encontrado en SUMS');
+    const expected = line.trim().split(/\s+/)[0].toLowerCase();
+    const actual = await sha256File(tmpPath);
+    if (actual !== expected) {
+      rmSync(tmpPath, { force: true });
+      throw new Error(`SHA NO coincide (${actual.slice(0, 12)}… ≠ ${expected.slice(0, 12)}…)`);
+    }
+    console.log('[BOOT] yt-dlp standalone verificado (SHA256 OK)');
+    return true;
+  } catch (e) {
+    console.log(`[BOOT] AVISO: no se pudo verificar SHA del standalone: ${e.message}`);
+    return false;
+  }
+}
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 
@@ -93,6 +128,7 @@ async function ensureYtDlpRuntime() {
   // Streaming a disco: NO bufferizar en memoria (contenedor con poca RAM → OOM kill 137).
   const tmp = `${target}.download`;
   await pipeline(Readable.fromWeb(res.body), createWriteStream(tmp));
+  await verificarShaStandalone(tmp);
   chmodSync(tmp, 0o755);
   renameSync(tmp, target);
   writeMarker(marker);
