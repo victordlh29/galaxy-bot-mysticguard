@@ -3,7 +3,7 @@
 // un zip a justrunmy y que quede el node_modules de una versión anterior).
 const { spawnSync } = require('child_process');
 const path = require('path');
-const { existsSync, mkdirSync, chmodSync, renameSync, createWriteStream, statSync, rmSync } = require('fs');
+const { existsSync, mkdirSync, chmodSync, renameSync, createWriteStream, statSync, rmSync, openSync, readSync, closeSync } = require('fs');
 const { createHash } = require('crypto');
 
 async function sha256File(p) {
@@ -139,6 +139,139 @@ function writeMarker(marker) {
   require('fs').writeFileSync(marker, String(Date.now()));
 }
 
+// PO Token provider (bgutil): instalar dependencias en el HOST porque canvas es nativo
+// y los node_modules traídos de otro SO no sirven. El build/ TS ya viene compilado en el
+// zip: si existe, solo hacen falta deps de runtime (--omit=dev, sin tsc).
+// stdio SIEMPRE heredado: un fallo de npm sin log fue indetectable en el hosting.
+async function ensurePotProviderRuntime() {
+  const dir = path.join(ROOT, 'vendor', 'pot-provider');
+  const entry = path.join(dir, 'build', 'main.js');
+  if (!existsSync(path.join(dir, 'package.json'))) return;
+  if (existsSync(entry) && existsSync(path.join(dir, 'node_modules'))) {
+    console.log('[BOOT] POT provider ya compilado');
+    return;
+  }
+  const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  // El provider declara engines >=22 y el host puede correr 20: no dejar que npm lo bloquee.
+  const npmEnv = { ...process.env, npm_config_engine_strict: 'false' };
+  const needBuild = !existsSync(entry);
+  console.log(`[BOOT] POT provider: instalando dependencias en el host${needBuild ? ' + compilando (tsc)' : ''}...`);
+
+  const install = (extra) => spawnSync(npmBin, ['ci', ...extra, '--no-audit', '--no-fund'], { cwd: dir, stdio: 'inherit', env: npmEnv })
+    .status === 0 || spawnSync(npmBin, ['install', ...extra, '--no-audit', '--no-fund'], { cwd: dir, stdio: 'inherit', env: npmEnv }).status === 0;
+
+  if (!install(needBuild ? [] : ['--omit=dev'])) {
+    console.warn('[BOOT] AVISO: npm falló para POT provider (ver log superior); música seguirá sin PO tokens');
+    return;
+  }
+
+  if (needBuild) {
+    const tsc = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['tsc'], { cwd: dir, stdio: 'inherit' });
+    if (tsc.status !== 0) {
+      console.warn('[BOOT] AVISO: tsc falló para POT provider (ver log superior); música seguirá sin PO tokens');
+      return;
+    }
+  }
+
+  console.log('[BOOT] POT provider listo');
+  // Dependencias instaladas: reintentar arranque del servidor (el primer start() se
+  // saltó por node_modules ausentes).
+  try {
+    require(path.join(__dirname, '..', 'music', 'potProvider')).start();
+  } catch (e) {
+    console.warn(`[BOOT] AVISO: no se pudo relanzar el POT provider: ${e.message}`);
+  }
+}
+
+// Opción 3 anti bot-check: binarios de Cloudflare WARP (wgcf + wireproxy) para Linux.
+// Versiones pineadas (los assets de wgcf llevan el número en el nombre). Streaming a
+// disco como el standalone, para no bufferizar en RAM.
+const WARP_DIR = path.join(ROOT, 'vendor', 'warp');
+const WARP_BIN = path.join(WARP_DIR, 'bin');
+const WGCF_VERSION = '2.2.22';
+const WIREPROXY_VERSION = '1.0.9';
+
+// Un binario truncado/corrupto pasa existsSync pero el kernel rechaza el execve y
+// sh lo interpreta como script (síntoma visto en justrunmy: "wireproxy: 1: <basura>: not found").
+// Validar el magic ELF (\x7fELF) detecta eso antes de intentar ejecutarlo.
+function esElf(p) {
+  try {
+    const fd = openSync(p, 'r');
+    const buf = Buffer.alloc(4);
+    const n = readSync(fd, buf, 0, 4, 0);
+    closeSync(fd);
+    return n === 4 && buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function ensureWarpBinaries() {
+  if (process.platform === 'win32') return;
+  const wgcf = path.join(WARP_BIN, 'wgcf');
+  const wireproxy = path.join(WARP_BIN, 'wireproxy');
+  mkdirSync(WARP_BIN, { recursive: true });
+  // Binarios corruptos cacheados de un boot anterior: borrarlos para forzar re-descarga.
+  for (const t of [wgcf, wireproxy]) {
+    if (existsSync(t) && !esElf(t)) {
+      console.warn(`[BOOT] WARP ${path.basename(t)} corrupto (magic ELF inválido); borrado para re-descargar`);
+      rmSync(t, { force: true });
+    }
+  }
+  if (existsSync(wgcf) && existsSync(wireproxy)) {
+    console.log('[BOOT] WARP: binarios ya descargados');
+    return;
+  }
+  const downloads = [
+    ['wgcf', wgcf, false],
+    ['wireproxy', wireproxy, true]
+  ];
+  for (const [nombre, target, esTgz] of downloads) {
+    if (existsSync(target)) continue; // ya existe y pasó el chequeo ELF
+    const url = esTgz
+      ? `https://github.com/pufferffish/wireproxy/releases/download/v${WIREPROXY_VERSION}/wireproxy_linux_amd64.tar.gz`
+      : `https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_amd64`;
+    let ok = false;
+    let ultimoError = '';
+    for (let intento = 1; intento <= 2 && !ok; intento++) {
+      try {
+        console.log(`[BOOT] WARP: descargando ${nombre}${intento > 1 ? ` (reintento ${intento})` : ''}...`);
+        const res = await fetch(url, { signal: AbortSignal.timeout(60000) });
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+        const tmp = `${target}.download`;
+        if (esTgz) {
+          const tgz = tmp;
+          await pipeline(Readable.fromWeb(res.body), createWriteStream(tgz));
+          spawnSync('tar', ['-xzf', tgz, '-C', WARP_BIN, nombre], { stdio: 'ignore' });
+          rmSync(tgz, { force: true });
+          if (!existsSync(target)) throw new Error('tar no extrajo el binario');
+        } else {
+          await pipeline(Readable.fromWeb(res.body), createWriteStream(tmp));
+          renameSync(tmp, target);
+        }
+        chmodSync(target, 0o755);
+        if (!esElf(target)) {
+          rmSync(target, { force: true });
+          throw new Error('el contenido descargado no es un binario ELF válido');
+        }
+        ok = true;
+      } catch (e) {
+        ultimoError = e.message;
+      }
+    }
+    if (!ok) {
+      console.warn(`[BOOT] AVISO: WARP ${nombre} falló tras 2 intentos: ${ultimoError}`);
+      return;
+    }
+  }
+  console.log('[BOOT] WARP: binarios listos');
+  try {
+    require(path.join(__dirname, '..', 'music', 'warpProxy')).start();
+  } catch (e) {
+    console.warn(`[BOOT] AVISO: no se pudo relanzar WARP: ${e.message}`);
+  }
+}
+
 // Diagnóstico de entorno para el hosting: metadatos de YT_COOKIES/YT_PROXY.
 // NUNCA imprime el contenido de las cookies.
 function diagEnv() {  const c = process.env.YT_COOKIES;
@@ -215,11 +348,14 @@ function run() {
 
   // Retraso: dejar pasar el pico de memoria del arranque antes de descargar.
   setTimeout(() => {
-    ensureYtDlpRuntime().catch((e) => {
-      console.error(`[BOOT] AVISO: no se pudo asegurar yt-dlp standalone: ${e.message} (si hay python3 no afecta)`);
-    });
+    ensureYtDlpRuntime()
+      .then(() => ensurePotProviderRuntime())
+      .then(() => ensureWarpBinaries())
+      .catch((e) => {
+        console.error(`[BOOT] AVISO: runtime de música incompleto: ${e.message}`);
+      });
   }, 8000).unref();
 }
 
 if (require.main === module) run();
-module.exports = { run };
+module.exports = { run, esElf };

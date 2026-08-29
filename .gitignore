@@ -1,4 +1,4 @@
-node_modules/
+﻿node_modules/
 .env
 cookies.txt
 galaxy-dashboard.html
@@ -8,3 +8,4 @@ crash.log
 *.log
 *.zip
 .DS_Store
+vendor/pot-provider/node_modules/

@@ -3,6 +3,10 @@ require('dotenv').config();
 // directamente e ignora npm start), instala lo que falte antes de cargar el resto.
 // Va tras dotenv para que el diagnóstico de entorno vea también el .env local.
 require('./src/scripts/ensure-deps').run();
+// Anti bot-check: WARP primero (setea YT_PROXY si el handshake sale) y POT provider
+// después (PO tokens; útil también a través del proxy). Ambos best-effort.
+require('./src/music/warpProxy').start();
+require('./src/music/potProvider').start();
 const fs = require('fs');
 const path = require('path');
 const mongoose = require('mongoose');
