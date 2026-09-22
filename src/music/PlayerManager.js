@@ -25,11 +25,16 @@ const DEFAULT_VOLUME = 40;
 // Nodos públicos (mismo stack que TitanBot). Los 3 verificados en vivo: loadtracks
 // devuelve search/playlist sin salir por proxy. Los passwords de Serenetia y MilloHost
 // son links de invitación a su Discord (rotan y exigen pertenecer).
+//
+// `jirayu` SE RETIRÓ (22/09/2026): su websocket conecta, pero sus llamadas REST salen por
+// un proxy (38.49.216.39) que responde `i/o timeout` → `GET /v4/info failed with 500` en
+// bucle de 5 reintentos y nunca entra en connectedNodes() (se queda sin sessionId). No
+// aportaba música: solo ruido de logs y reintentos perdidos. Si vuelve a estar sano, se
+// añade con LAVALINK_NODES (JSON array) sin tocar el código.
 // Override completo vía LAVALINK_NODES (JSON array) si el usuario quiere nodos propios.
 const DEFAULT_NODES = [
   { name: 'serenetia', host: 'lavalinkv4.serenetia.com', port: 443, password: 'https://seretia.link/discord', secure: true },
   { name: 'millohost', host: 'lava-v4.millohost.my.id', port: 443, password: 'https://discord.gg/mjS5J2K3ep', secure: true },
-  { name: 'jirayu', host: 'lavalink.jirayu.net', port: 443, password: 'youshallnotpass', secure: true },
   { name: 'trinium', host: 'lavalink-v4.triniumhost.com', port: 443, password: 'free', secure: true }
 ];
 
