@@ -1,6 +1,7 @@
 const { getConfig } = require('../../utils/config');
 const { safeAddRole } = require('../../utils/roles');
 const { logCommand } = require('../../utils/logger');
+const { createDedupe } = require('../../utils/dedupe');
 
 // La bienvenida salía DOS veces "a veces". El envío está en un único sitio, así que el
 // duplicado viene del evento, no del código: Discord REENVÍA guildMemberAdd cuando el bot
@@ -9,36 +10,19 @@ const { logCommand } = require('../../utils/logger');
 //
 // La clave incluye `joinedTimestamp`, que cambia si el miembro se vuelve a unir de verdad:
 // así un reingreso legítimo SÍ recibe su bienvenida y solo se ignora la repetición del
-// MISMO ingreso. OJO: la guarda es por proceso; si el bot corre en dos instancias a la vez
-// (local + hosting) cada proceso manda la suya y esto no puede evitarlo (regla: UNA
-// instancia activa).
+// MISMO ingreso.
 const WELCOME_TTL_MS = 10 * 60 * 1000;
-const handled = new Map();
+const alreadyHandled = createDedupe(WELCOME_TTL_MS, 'WELCOME');
 
 function joinKey(member) {
   const ts = member.joinedTimestamp || (member.joinedAt ? new Date(member.joinedAt).getTime() : 0);
   return `${member.guild.id}:${member.id}:${ts}`;
 }
 
-function alreadyHandled(member) {
-  const now = Date.now();
-  for (const [k, t] of handled) {
-    if (now - t > WELCOME_TTL_MS) handled.delete(k);
-  }
-  const key = joinKey(member);
-  const prev = handled.get(key);
-  if (prev && now - prev < WELCOME_TTL_MS) return true;
-  handled.set(key, now);
-  return false;
-}
-
 module.exports = {
   name: 'guildMemberAdd',
   async execute(member) {
-    if (alreadyHandled(member)) {
-      console.log(`[WELCOME] evento repetido ignorado para ${member.user.tag} (${member.id}) — reconexión del gateway`);
-      return;
-    }
+    if (alreadyHandled(joinKey(member))) return;
 
     const config = await getConfig(member.guild.id);
 
@@ -71,5 +55,5 @@ module.exports = {
     });
   },
   // Expuesto para test/diagnóstico.
-  _alreadyHandled: alreadyHandled
+  _alreadyHandled: (member) => alreadyHandled(joinKey(member))
 };
