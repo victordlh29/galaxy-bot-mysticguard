@@ -1,0 +1,22 @@
+server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  server:
+    password: "youshallnotpass"
+    playerUpdateInterval: 5s
+    sources:
+      youtube: true
+      soundcloud: true
+      bandcamp: true
+      twitch: true
+      vimeo: true
+      http: true
+    opusEncodingQuality: 10
+    trackStuckThresholdMs: 10000
+
+logging:
+  level:
+    root: INFO
+    lavalink: INFO

@@ -106,7 +106,7 @@ function start() {
     }
   });
 
-  // Healthcheck paciente: en arranque frío (página cache vacía + descarga WARP concurrente)
+  // Healthcheck paciente: en arranque frío (página cache vacía)
   // el provider puede tardar >20s. Aviso a los 20s pero se sigue intentando hasta 120s.
   const inicio = Date.now();
   let avisado20 = false;

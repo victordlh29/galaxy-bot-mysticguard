@@ -1,65 +1,102 @@
-const {
-  joinVoiceChannel,
-  createAudioPlayer,
-  createAudioResource,
-  NoSubscriberBehavior,
-  AudioPlayerStatus,
-  StreamType
-} = require('@discordjs/voice');
-const { spawn } = require('child_process');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const ffmpegStatic = require('ffmpeg-static');
-const { YOUTUBE_DL_PATH } = require('youtube-dl-exec').constants;
+// Fachada de reproducción vía Lavalink (cliente Riffy) sobre NODOS PÚBLICOS.
+// Sustituye al pipeline local yt-dlp→ffmpeg→@discordjs/voice: la extracción de audio
+// la hace el nodo desde su propia IP, evitando el bot-check de YouTube que quema las
+// IPs de datacenter (hosting). La cola, autoplay, loop, filtros/EQ y el volumen siguen
+// viviendo AQUÍ (en memoria) con la misma API pública que consumen commands.js y api.js.
+//
+// Modelo de avance: se reproducen UN track a la vez VÍA la cola nativa de Riffy
+// (queue.add + player.play()). Es OBLIGATORIO: Riffy lee `player.current` (que solo
+// se setea en play()) para manejar TrackEnd/TrackException/TrackStuck; si lanzas el
+// tema con REST updatePlayer directo `current` queda null y sus handlers crashean
+// (Cannot read properties of null reading 'info') antes de emitirnos el evento.
+// El avance lo deciden los EVENTOS:
+//   - queueEnd        → termina el tema y la cola de Riffy quedó vacía (normal)
+//   - trackEnd        → cualquier razón EXCEPTO 'replaced' (p. ej. loadfailed)
+//   - trackError      → excepción de audio (Riffy hace stop(): llega después un queueEnd)
+//   - trackStuck      → tema colgado (idem)
+// Todos desembocan en onTrackEnded → advance(), con guard q._advancing (serializa
+// disparos concurrentes) + debounce de 300ms (absorbe las ráfagas de 'stopped' →
+// trackEnd + queueEnd, y error → queueEnd, que generarían doble avance).
+const { Riffy } = require('riffy');
 
-const EQ_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 const MAX_VOLUME = 100;
 const DEFAULT_VOLUME = 40;
-const COOKIES_FILE = path.join(__dirname, '..', '..', 'cookies.txt');
-const PIPELINE_TIMEOUT_MS = Number(process.env.MUSIC_PIPELINE_TIMEOUT_MS) || 60000;
-let browsersUsable = null;
 
-// YT_COOKIES puede ser una RUTA o el CONTENIDO del cookies.txt (paneles como justrunmy).
-// Si es contenido multilínea se materializa en un archivo temporal para pasarle --cookies a yt-dlp.
-function resolveCookieFile() {
-  const env = process.env.YT_COOKIES;
-  if (env && env.trim()) {
-    let content = env.replace(/\r\n/g, '\n').replace(/\\n/g, '\n');
-    if (/^\s*#/.test(content) || content.includes('\n')) {
-      try {
-        const tmp = path.join(os.tmpdir(), `yt_cookies_${process.pid}.txt`);
-        fs.writeFileSync(tmp, content.endsWith('\n') ? content : content + '\n', 'utf8');
-        return tmp;
-      } catch (_) {}
+// Nodos públicos (mismo stack que TitanBot). Los 3 verificados en vivo: loadtracks
+// devuelve search/playlist sin salir por proxy. Los passwords de Serenetia y MilloHost
+// son links de invitación a su Discord (rotan y exigen pertenecer).
+// Override completo vía LAVALINK_NODES (JSON array) si el usuario quiere nodos propios.
+const DEFAULT_NODES = [
+  { name: 'serenetia', host: 'lavalinkv4.serenetia.com', port: 443, password: 'https://seretia.link/discord', secure: true },
+  { name: 'millohost', host: 'lava-v4.millohost.my.id', port: 443, password: 'https://discord.gg/mjS5J2K3ep', secure: true },
+  { name: 'jirayu', host: 'lavalink.jirayu.net', port: 443, password: 'youshallnotpass', secure: true },
+  { name: 'trinium', host: 'lavalink-v4.triniumhost.com', port: 443, password: 'free', secure: true }
+];
+
+// Lavalink propio en ESTE PC (`lavalink-local/start.ps1`, IP residencial → YouTube directo
+// sin bot-check). Se añade SOLO en Windows, que es donde corre el bot de casa: en el
+// hosting Linux (HeavenCloud/justrunmy) 127.0.0.1 no existe y el nodo solo generaba un
+// bucle de reconexión (ECONNREFUSED) y el falso "nodos conectados: NINGUNO" en cada boot.
+// Para llevar el nodo local al hosting: abrir el puerto 2333 TCP en el router (WAN→PC) y
+// poner LAVALINK_NODES con la IP PÚBLICA de casa (una IP de loopback allí no sirve).
+const LOCAL_NODE = { name: 'home', host: '127.0.0.1', port: 2333, password: 'youshallnotpass', secure: false };
+
+const LOOPBACK_RE = /^(?:::1|0\.0\.0\.0|localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i;
+function isLoopbackNode(n) {
+  return !!(n && LOOPBACK_RE.test(String(n.host || '').trim()));
+}
+
+function lavalinkNodes() {
+  let nodes = null;
+  try {
+    const raw = process.env.LAVALINK_NODES;
+    if (raw && raw.trim()) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) nodes = parsed;
     }
-    return env;
+  } catch (_) {}
+  if (!nodes) {
+    nodes = [...DEFAULT_NODES];
+    if (process.platform === 'win32') nodes.unshift(LOCAL_NODE);
   }
-  return fs.existsSync(COOKIES_FILE) ? COOKIES_FILE : null;
+  // En Linux un nodo loopback (127.0.0.1/localhost) es siempre una IP muerta: el único
+  // Lavalink local posible vive en el propio host y, si lo hubiera, se declara con su IP
+  // pública o con LAVALINK_ALLOW_LOCAL=1. Descartarlo evita el bucle de reconexión.
+  const allowLocal = process.env.LAVALINK_ALLOW_LOCAL === '1' || process.platform === 'win32';
+  const out = [];
+  let skipped = 0;
+  for (const n of nodes) {
+    if (isLoopbackNode(n) && !allowLocal) { skipped++; continue; }
+    out.push(n);
+  }
+  if (skipped) console.log(`[MUSIC] ${skipped} nodo(s) de loopback omitido(s) en este host (LAVALINK_ALLOW_LOCAL=1 para forzarlos).`);
+  if (!out.length) console.warn('[MUSIC] sin nodos Lavalink utilizables: la música no arrancará (revisa LAVALINK_NODES).');
+  return out;
 }
 
-function isRetryableYtError(err) {
-  const m = err && err.message ? err.message : '';
-  return /Sign in to confirm|Sign in to continue|not a bot|Login required|HTTP Error 4(01|03)/i.test(m)
-    || /Requested format is not available/i.test(m)
-    || /cook|decrypt|database|profile/i.test(m)
-    || /Timeout: sin datos de audio/i.test(m);
-}
-
-const BOT_CHECK_RE = /Sign in to confirm|Sign in to continue|not a bot|Login required|HTTP Error 4(01|03)/i;
-
-function killProcs(procs) {
-  for (const p of procs || []) {
-    try {
-      if (p && !p.killed) p.kill('SIGTERM');
-    } catch (_) {}
-  }
+// Convierte un Track de Riffy (v4: ya trae .track encoded + info completa) a nuestro
+// shape de siempre. `_lv` (no enumerable) cachea la instancia para reproducirla sin
+// re-resolver en el nodo al llegarle el turno.
+function fromLavalinkTrack(lv) {
+  const info = (lv && lv.info) || {};
+  const t = {
+    type: info.sourceName || 'youtube',
+    url: info.uri,
+    title: info.title || 'Tema sin título',
+    author: info.author || null,
+    duration: Number.isFinite(info.length) && info.length > 0 ? Math.round(info.length / 1000) : null,
+    thumbnail: info.thumbnail || info.artworkUrl || null
+  };
+  Object.defineProperty(t, '_lv', { value: lv, enumerable: false, writable: false });
+  return t;
 }
 
 class PlayerManager {
   constructor() {
     this.queues = new Map();
     this.warnings = [];
+    this.client = null;
+    this.riffy = null;
   }
 
   addWarning(msg) {
@@ -73,73 +110,215 @@ class PlayerManager {
     return this.warnings;
   }
 
+  connectedNodes() {
+    if (!this.riffy) return [];
+    return [...this.riffy.nodeMap.values()].filter((n) => n.connected && n.sessionId);
+  }
+
+  // Crea Riffy, reenvía los paquetes de voz del gateway y registra los eventos.
+  // Espera (hasta 12s) a que conecte al menos un nodo; si ninguno conecta no es fatal:
+  // los nodos de Riffy siguen reintentando y los comandos fallarán con un mensaje claro.
+  async initLavalink(client) {
+    if (this.riffy) return true;
+    this.client = client;
+    this.riffy = new Riffy(client, lavalinkNodes(), {
+      send: this.makeSendFn(client),
+      defaultSearchPlatform: process.env.LAVALINK_SEARCH_PLATFORM || 'ytmsearch',
+      restVersion: 'v4',
+      bypassChecks: { nodeFetchInfo: true },
+      migrateOnDisconnect: true,
+      migrateOnFailure: true
+    });
+
+    client.on('raw', (packet) => {
+      try {
+        this.riffy.updateVoiceState(packet);
+      } catch (_) {}
+    });
+
+    this.riffy.on('debug', (...args) => {
+      if (process.env.DEBUG_MUSIC) console.log('[MUSIC] riffy:', ...args);
+    });
+
+    this.riffy.on('nodeConnect', (node) => {
+      this.consoleNodeState();
+    });
+    this.riffy.on('nodeReconnect', (node) => {
+      console.warn(`[MUSIC] reconectando nodo lavalink ${node.name} (${node.host})...`);
+    });
+    this.riffy.on('nodeDisconnect', (node) => {
+      console.warn(`[MUSIC] nodo lavalink desconectado: ${node.name}`);
+      this.addWarning(`⚠️ Nodo Lavalink ${node.name} se desconectó. La música usa otro nodo o reintenta.`);
+      this.consoleNodeState();
+    });
+    this.riffy.on('nodeError', (node, err) => {
+      if (err && /Unable to connect|not authorized/i.test(String(err.message || ''))) return;
+      console.warn(`[MUSIC] error en nodo lavalink ${node.name}: ${err && err.message}`);
+      this.consoleNodeState();
+    });
+
+    this.riffy.on('queueEnd', (player) => this.onTrackEnded(player.guildId));
+    this.riffy.on('trackEnd', (player, track, payload) => {
+      const reason = String((payload && payload.reason) || '').toLowerCase();
+      if (reason === 'replaced') return;
+      this.onTrackEnded(player.guildId);
+    });
+    this.riffy.on('trackError', (player, track, payload) => {
+      const exception = payload && payload.exception;
+      console.warn(`[MUSIC] error de audio en ${player.guildId}: ${exception ? JSON.stringify(exception).slice(0, 200) : 'desconocido'}`);
+      this.onTrackEnded(player.guildId);
+    });
+    this.riffy.on('trackStuck', (player) => {
+      console.warn(`[MUSIC] tema estancado en ${player.guildId}, saltándolo`);
+      this.onTrackEnded(player.guildId);
+    });
+
+    this.riffy.on('playerDestroy', (player) => {
+      const q = this.queues.get(player.guildId);
+      if (!q) return;
+      q.pl = null;
+      q._playing = false;
+      q.paused = false;
+      q.connection = null;
+    });
+
+    this.riffy.init(client.user.id);
+    return this.waitForNode(12000);
+  }
+
+  consoleNodeState() {
+    const list = this.connectedNodes().map((n) => `${n.name}@${n.host}:${n.port}`);
+    console.log(`[MUSIC] nodos lavalink conectados: ${list.length ? list.join(', ') : 'NINGUNO'}`);
+  }
+
+  async waitForNode(ms) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (this.connectedNodes().length) {
+        this.consoleNodeState();
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    const total = this.riffy.nodes.length;
+    console.warn(`[MUSIC] tras ${ms / 1000}s ningún nodo lavalink conectó (${total} configurados). La música fallará hasta que conecte.`);
+    this.addWarning(`⚠️ Sin nodos Lavalink conectados (${total} configurados). La música está temporalmente caída.`);
+    return false;
+  }
+
+  makeSendFn(client) {
+    return (payload) => {
+      try {
+        if (!payload || !payload.d) return;
+        const guild = client.guilds.cache.get(payload.d.guild_id);
+        if (!guild || !guild.shard) return;
+        guild.shard.send(payload);
+      } catch (_) {}
+    };
+  }
+
+  clampVolume(v) {
+    return Math.max(0, Math.min(MAX_VOLUME, Number.isFinite(v) ? v : DEFAULT_VOLUME));
+  }
+
   getQueue(guildId, volume, savedEq = null) {
     if (!this.queues.has(guildId)) {
-      const vol = Number.isFinite(volume) ? Math.max(0, Math.min(MAX_VOLUME, volume)) : DEFAULT_VOLUME;
-      this.queues.set(guildId, {
+      const vol = this.clampVolume(volume);
+      const q = {
         tracks: [],
         current: null,
         loop: false,
         autoplay: false,
+        autoplayFailures: 0,
         volume: vol,
+        paused: false,
+        _playing: false,
+        _advancing: false,
+        _lastEndAt: 0,
         filter: 'off',
         eq: savedEq && savedEq.length === 10 ? [...savedEq] : Array(10).fill(0),
-        player: createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } }),
+        pl: null,
         textChannel: null,
         connection: null,
-        procs: [],
-        retriedUrl: null
-      });
-      const q = this.queues.get(guildId);
-      q.player.on('stateChange', (oldState, newState) => {
-        if (newState.status === AudioPlayerStatus.Idle && oldState.status !== AudioPlayerStatus.Idle) {
-          const cur = q.current;
-          const played = q.player.state.playbackDuration || 0;
-          const expected = cur && cur.duration ? cur.duration * 1000 : 0;
-          const cutShort = !!cur && expected > 30000 && played > 0 && played < expected - 30000;
-          if (cutShort && q.retriedUrl !== cur.url) {
-            q.retriedUrl = cur.url;
-            if (q.textChannel && q.textChannel.isSendable && q.textChannel.isSendable()) {
-              q.textChannel.send(`🔄 Descarga interrumpida en **${cur.title}**, reintentando...`).catch(() => {});
-            }
-            q.tracks.unshift(cur);
-            q.current = null;
-            return this.playNext(guildId);
-          }
-          this.playNext(guildId);
+        finishTimer: null,
+        _radioFilled: false,
+        player: null
+      };
+      q.connection = {
+        get joinConfig() {
+          return { channelId: q.pl ? q.pl.voiceChannel || null : null };
         }
-      });
-      q.player.on('error', (err) => {
-        console.error(`[MUSIC] error del player en ${guildId}:`, err.message);
-        this.playNext(guildId);
-      });
+      };
+      q.player = {
+        get state() {
+          return q.paused ? { status: 'paused' } : q._playing ? { status: 'playing' } : { status: 'idle' };
+        }
+      };
+      this.queues.set(guildId, q);
     } else if (Number.isFinite(volume)) {
       const q = this.queues.get(guildId);
-      if (q.volume !== Math.max(0, Math.min(MAX_VOLUME, volume))) this.applyVolume(q, volume);
+      const v2 = this.clampVolume(volume);
+      if (q.volume !== v2) this.applyVolume(q, v2);
     }
     return this.queues.get(guildId);
   }
 
   applyVolume(q, volume) {
-    q.volume = Math.max(0, Math.min(MAX_VOLUME, volume));
-    if (q.player.state.resource && q.player.state.resource.volume) {
-      q.player.state.resource.volume.setVolume(this.linearVolume(q));
+    q.volume = this.clampVolume(volume);
+    if (q.pl) {
+      try { q.pl.setVolume(q.volume); } catch (_) {}
     }
     return q.volume;
-  }
-
-  linearVolume(q) {
-    return Math.pow(q.volume / 100, 1.660964) * this.volumeScale(q);
   }
 
   setVolume(guildId, volume) {
     return this.applyVolume(this.getQueue(guildId), volume);
   }
 
+  getVolume(guildId) {
+    const q = this.queues.get(guildId);
+    return q ? q.volume : null;
+  }
+
+  // Mapas de filtros/EQ a la API de Lavalink (aplican en vivo, sin reiniciar el tema).
+  buildEqualizer(q) {
+    const bands = [];
+    const filterBoost = q.filter === 'bassboost' ? 10 : q.filter === 'bassboost-lite' ? 6 : 0;
+    for (let i = 0; i < 10; i++) {
+      const db = (q.eq[i] || 0) + (filterBoost && i < 4 ? filterBoost : 0);
+      if (!db) continue;
+      const gain = Math.max(-0.25, Math.min(1, db / 40));
+      if (!gain) continue;
+      bands.push({ band: Math.round((i * 14) / 9), gain });
+    }
+    return bands;
+  }
+
+  async applyFilters(q) {
+    if (!q.pl) return;
+    const f = q.pl.filters;
+    try {
+      f.timescale = q.filter === 'nightcore'
+        ? { speed: 1.5, pitch: 1.5, rate: 1 }
+        : q.filter === 'vaporwave'
+          ? { speed: 0.8, pitch: 0.85, rate: 1 }
+          : null;
+      f.rotation = q.filter === '8d' ? { rotationHz: 0.08 } : null;
+      f.karaoke = q.filter === 'karaoke'
+        ? { level: 1, monoLevel: 1, filterBand: 220, filterWidth: 100 }
+        : null;
+      f.equalizer = this.buildEqualizer(q);
+      f.volume = 1;
+      await f.updateFilters();
+    } catch (err) {
+      console.warn(`[MUSIC] aplicar filtros lavalink: ${err && err.message}`);
+    }
+  }
+
   setFilter(guildId, filter) {
     const q = this.getQueue(guildId);
     q.filter = filter;
-    if (q.current) this.replayCurrent(guildId);
+    this.applyFilters(q);
     return q.filter;
   }
 
@@ -147,7 +326,7 @@ class PlayerManager {
     const q = this.getQueue(guildId);
     if (band < 0 || band > 9) return q.eq;
     q.eq[band] = Math.max(-10, Math.min(10, gain));
-    if (q.current) this.replayCurrent(guildId);
+    this.applyFilters(q);
     return q.eq;
   }
 
@@ -157,472 +336,445 @@ class PlayerManager {
     return q.autoplay;
   }
 
-  buildFilterArgs(q) {
-    const args = [];
-    if (q.filter === 'bassboost') args.push('bass=g=10');
-    else if (q.filter === 'bassboost-lite') args.push('bass=g=6');
-    else if (q.filter === '8d') args.push('apulsator=hz=0.08');
-    else if (q.filter === 'nightcore') args.push('asetrate=44100*1.25,aresample=44100,atempo=1.06');
-    else if (q.filter === 'vaporwave') args.push('asetrate=44100*0.8,aresample=44100,atempo=1.1');
-    else if (q.filter === 'karaoke') args.push('stereotools=mlev=0.03');
-    q.eq.forEach((gain, i) => {
-      if (gain) args.push(`equalizer=f=${EQ_FREQS[i]}:width_type=o:width=1:g=${gain}`);
-    });
-    return args;
-  }
-
-  getEqBoostDb(q) {
-    const bandDb = q.eq.filter((g) => g > 0);
-    const fromBands = bandDb.length ? Math.max(...bandDb) : 0;
-    const fromFilter = q.filter === 'bassboost' ? 10 : q.filter === 'bassboost-lite' ? 6 : 0;
-    return Math.max(fromBands, fromFilter);
-  }
-
-  volumeScale(q) {
-    const boost = Math.min(12, this.getEqBoostDb(q));
-    return boost > 0 ? Math.pow(10, -boost / 20) : 1;
-  }
-
-  async replayCurrent(guildId) {
-    const q = this.queues.get(guildId);
-    if (!q || !q.current) return;
-    q.tracks.unshift(q.current);
-    q.current = null;
-    q.player.stop(true);
-  }
-
-  isPlaylistUrl(u) {
-    return /youtube\.com\/playlist\//i.test(u) || (/list=/i.test(u) && !/[?&]v=/i.test(u));
-  }
-
-  trackFromInfo(v, fallbackUrl) {
-    const thumbs = Array.isArray(v.thumbnails) ? v.thumbnails.filter((t) => t && t.url) : [];
-    return {
-      type: 'youtube',
-      url: v.webpage_url || fallbackUrl,
-      title: v.title || fallbackUrl,
-      author: v.uploader || null,
-      duration: typeof v.duration === 'number' ? Math.round(v.duration) : null,
-      thumbnail: thumbs.length ? thumbs[thumbs.length - 1].url : null
-    };
-  }
-
-  // Metadatos vía yt-dlp (misma herramienta que el stream, sin dependencias frágiles tipo play-dl)
-  runYtDlpJson(fullArgs) {
-    return new Promise((resolve, reject) => {
-      let p;
-      try {
-        p = spawn(YOUTUBE_DL_PATH, fullArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-      } catch (err) {
-        return reject(err);
-      }
-      let out = '';
-      let err = '';
-      const timer = setTimeout(() => {
-        try { if (!p.killed) p.kill('SIGTERM'); } catch (_) {}
-        reject(new Error('Timeout: yt-dlp no devolvió metadatos'));
-      }, 30000);
-      p.stdout.on('data', (d) => { out += d.toString(); });
-      p.stderr.on('data', (d) => { err = (err + d.toString()).slice(-1000); });
-      p.on('error', (e) => { clearTimeout(timer); reject(e); });
-      p.on('exit', (code) => {
-        clearTimeout(timer);
-        const trimmedOut = out.trim();
-        if (code !== 0 || !trimmedOut) {
-          return reject(new Error(`yt-dlp (metadatos) salió con código ${code}: ${(err || trimmedOut).slice(0, 200)}`));
-        }
-        try {
-          resolve(JSON.parse(trimmedOut));
-        } catch (_) {
-          reject(new Error('yt-dlp devolvió JSON inválido'));
-        }
-      });
-    });
-  }
-
-  // Variantes de autenticación compartidas por audio y metadatos:
-  // limpio-primero → cookies → cookies-de-navegador, cada una × clientes.
-  buildAuthVariants() {
-    const variants = [];
-    const clients = [null, 'android', 'tv', 'ios', 'web_embedded', 'tv_embedded', 'android_vr'];
-    const cookieFile = resolveCookieFile();
-    const pushClient = (label, flags) => {
-      for (const client of clients) {
-        const extra = client ? ['--extractor-args', `youtube:player_client=${client}`] : [];
-        variants.push({ label: client ? `${label} client=${client}` : label, flags: [...flags, ...extra] });
-      }
-    };
-    pushClient('sin cookies', []);
-    if (cookieFile) pushClient(`cookies:${cookieFile}`, ['--cookies', cookieFile]);
-    if (browsersUsable !== false) {
-      for (const browser of this.detectBrowsers()) {
-        pushClient(`cookies-from-browser:${browser}`, ['--cookies-from-browser', browser]);
-      }
-    }
-    return variants;
-  }
-
-  // Igual que createStream pero para metadatos JSON: itera variantes de auth
-  // (cap 10 ≈ 30s peor caso; los bot-check fallan en ~1-3s).
-  async runYtDlpJsonRetry(extraArgs) {
-    const base = ['-J', '--no-warnings', '--quiet', '--socket-timeout', '20', '--js-runtimes', 'node'];
-    if (process.env.YT_PROXY) base.push('--proxy', process.env.YT_PROXY);
-    const variants = this.buildAuthVariants().slice(0, 10);
-    let lastErr;
-    let botCheck;
-    for (const v of variants) {
-      try {
-        return await this.runYtDlpJson([...base, ...v.flags, ...extraArgs]);
-      } catch (err) {
-        lastErr = err;
-        if (!isRetryableYtError(err)) throw err;
-        if (BOT_CHECK_RE.test(err.message)) botCheck = err;
-        console.warn(`[MUSIC] metadatos fallo con ${v.label}: ${String(err.message).slice(0, 100)}`);
-      }
-    }
-    throw botCheck || lastErr;
-  }
-
-  async resolveQuery(query) {
-    const trimmed = query.trim();
-    try {
-      if (/^https?:\/\//i.test(trimmed)) {
-        if (this.isPlaylistUrl(trimmed)) {
-          const data = await this.runYtDlpJsonRetry(['--flat-playlist', trimmed]);
-          const entries = data && Array.isArray(data.entries) ? data.entries : [];
-          const tracks = [];
-          for (const e of entries) {
-            if (!e) continue;
-            const url = e.url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : null);
-            if (!url) continue;
-            tracks.push({
-              type: 'youtube',
-              url,
-              title: e.title || url,
-              author: e.uploader || null,
-              duration: typeof e.duration === 'number' ? Math.round(e.duration) : null,
-              thumbnail: Array.isArray(e.thumbnails) && e.thumbnails.length && e.thumbnails[e.thumbnails.length - 1].url ? e.thumbnails[e.thumbnails.length - 1].url : null
-            });
-          }
-          return tracks;
-        }
-        try {
-          const info = await this.runYtDlpJsonRetry(['--no-playlist', trimmed]);
-          return [this.trackFromInfo(info, trimmed)];
-        } catch (_) {
-          return [{ type: 'youtube', url: trimmed, title: trimmed, duration: null, thumbnail: null }];
-        }
-      }
-      const results = await this.runYtDlpJsonRetry([`ytsearch1:${trimmed}`]);
-      const entry = results && Array.isArray(results.entries) ? results.entries[0] : results;
-      if (!entry) return [];
-      return [this.trackFromInfo(entry, null)];
-    } catch (err) {
-      console.error('[MUSIC] error resolviendo query:', err.message);
-      return [];
-    }
-  }
-
-  async play(guildId, voiceChannel, track) {
-    const q = this.getQueue(guildId);
-    if (!q.connection) {
-      q.connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: voiceChannel.guild.id,
-        adapterCreator: voiceChannel.guild.voiceAdapterCreator
-      });
-      q.connection.subscribe(q.player);
-    }
-    q.tracks.push(track);
-    q.retriedUrl = null;
-    if (q.player.state.status !== AudioPlayerStatus.Playing && q.player.state.status !== AudioPlayerStatus.Buffering) {
-      await this.playNext(guildId);
-    }
-    return q;
-  }
-
-  async playNext(guildId) {
-    const q = this.getQueue(guildId);
-    let track;
-    if (!q.tracks.length) {
-      if (q.loop && q.current) {
-        q.tracks.push(q.current);
-        } else if (q.autoplay && q.current && q.current.url) {
-          try {
-            const related = await this.getRelated(q.current);
-          if (related) q.tracks.push(related);
-        } catch (_) {}
-        if (!q.tracks.length) return this.finishQueue(guildId);
-      } else {
-        return this.finishQueue(guildId);
-      }
-    }
-    track = q.tracks.shift();
-    q.current = track;
-    killProcs(q.procs);
-    q.procs = [];
-    try {
-      const stream = await this.createStream(track.url, q);
-      const resource = createAudioResource(stream, {
-        inputType: StreamType.Raw,
-        inlineVolume: true,
-        volume: this.linearVolume(q),
-        metadata: { title: track.title, url: track.url }
-      });
-      q.player.play(resource);
-      if (q.textChannel && q.textChannel.isSendable && q.textChannel.isSendable()) {
-        q.textChannel.send(`▶️ Reproduciendo: **${track.title}**`).catch(() => {});
-      }
-      return track;
-    } catch (err) {
-      console.error(`[MUSIC] error reproduciendo "${track.title}":`, err.message);
-      if (q.textChannel && q.textChannel.isSendable && q.textChannel.isSendable()) {
-        q.textChannel.send(`❌ No pude reproducir **${track.title}**: ${err.message}`).catch(() => {});
-      }
-      return this.playNext(guildId);
-    }
-  }
-
-  finishQueue(guildId) {
-    const q = this.queues.get(guildId);
-    if (!q) return null;
-    q.current = null;
-    killProcs(q.procs);
-    q.procs = [];
-    setTimeout(() => {
-      const qq = this.queues.get(guildId);
-      if (qq && !qq.tracks.length && qq.player.state.status !== AudioPlayerStatus.Playing) {
-        qq.player.stop(true);
-        killProcs(qq.procs);
-        qq.procs = [];
-        if (qq.connection) qq.connection.destroy();
-        this.queues.delete(guildId);
-      }
-    }, 30000);
-    return null;
-  }
-
-  async getRelated(track) {
-    try {
-      const qy = [track && track.author, track && track.title].filter(Boolean).join(' ').trim();
-      if (!qy) return null;
-      const data = await this.runYtDlpJsonRetry(['--flat-playlist', `ytsearch3:${qy}`]);
-      const entries = data && Array.isArray(data.entries) ? data.entries : [];
-      for (const e of entries) {
-        if (!e) continue;
-        const url = e.url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : null);
-        if (!url || (track.url && url === track.url)) continue;
-        return {
-          type: 'youtube',
-          url,
-          title: e.title || 'Video',
-          author: e.uploader || null,
-          duration: typeof e.duration === 'number' ? Math.round(e.duration) : null,
-          thumbnail: null
-        };
-      }
-      return null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  async createStream(url, q) {
-    const filterArgs = this.buildFilterArgs(q);
-    const attempts = this.buildYtDlpAttempts(url);
-    let lastErr;
-    let botCheckErr;
-    let cookiesFailed = false;
-    for (const attempt of attempts) {
-      try {
-        return await this.pipeOnce(url, filterArgs, attempt.args, q);
-      } catch (err) {
-        lastErr = err;
-        if (!isRetryableYtError(err)) throw err;
-        if (attempt.label.startsWith('cookies:')) cookiesFailed = true;
-        if (BOT_CHECK_RE.test(err.message)) botCheckErr = err;
-        if (/decrypt|database|cook/i.test(err.message) && browsersUsable === null) {
-          browsersUsable = false;
-          console.warn('[MUSIC] cookies del navegador no accesibles (DPAPI/ABE); se omitirán en este reinicio');
-        }
-        console.warn(`[MUSIC] fallo con ${attempt.label}: ${err.message.slice(0, 120)}`);
-      }
-    }
-    const final = botCheckErr || lastErr;
-    if (cookiesFailed) {
-      this.addWarning('⚠️ cookies.txt vencida o inválida — falló la autenticación. Re-exporta cookies.txt desde tu navegador (Get cookies.txt LOCALLY) o renueva YT_COOKIES.');
-    }
-    throw final;
-  }
-
-  buildYtDlpAttempts(url) {
-    const base = [
-      '-f', '140/bestaudio/best', '-o', '-', '--no-playlist', '--quiet', '--no-warnings',
-      '--retries', '5', '--retry-sleep', '3', '--fragment-retries', '5',
-      '--socket-timeout', '20', '--http-chunk-size', '64K',
-      '--js-runtimes', 'node'
-    ];
-    if (process.env.YT_PROXY) base.push('--proxy', process.env.YT_PROXY);
-    // Orden limpio-primero (estilo STAN_PLAYA): el intento sin auth va primero;
-    // cookies y cookies-de-navegador quedan como escalones de respaldo.
-    return this.buildAuthVariants().map((v) => ({ label: v.label, args: [...base, ...v.flags, url] }));
-  }
-
-  detectBrowsers() {
-    const found = [];
-    const local = process.env.LOCALAPPDATA || '';
-    const appdata = process.env.APPDATA || '';
-    const checks = [
-      ['edge', path.join(local, 'Microsoft', 'Edge', 'User Data', 'Default', 'Network', 'Cookies')],
-      ['chrome', path.join(local, 'Google', 'Chrome', 'User Data', 'Default', 'Network', 'Cookies')],
-      ['brave', path.join(local, 'BraveSoftware', 'Brave-Browser', 'User Data', 'Default', 'Network', 'Cookies')],
-      ['firefox', path.join(appdata, 'Mozilla', 'Firefox', 'Profiles')]
-    ];
-    for (const [name, p] of checks) {
-      try {
-        if (name === 'firefox' ? fs.existsSync(p) : fs.statSync(p).isFile()) found.push(name);
-      } catch (_) {}
-    }
-    return found;
-  }
-
-  pipeOnce(url, filterArgs, dlArgs, q) {
-    return new Promise((resolve, reject) => {
-      let dl;
-      let ff;
-      let settled = false;
-      let dataReceived = false;
-      let ffStderr = '';
-      let dlStderr = '';
-
-      const timer = setTimeout(() => {
-        if (!dataReceived) {
-          const dlTail = dlStderr.trim().slice(-600) || 'sin stderr de yt-dlp';
-          const ffTail = ffStderr.trim().slice(-300) || 'sin stderr de ffmpeg';
-          finish(new Error(`Timeout: sin datos de audio en ${PIPELINE_TIMEOUT_MS / 1000}s (yt-dlp: ${dlTail} | ffmpeg: ${ffTail})`));
-        }
-      }, PIPELINE_TIMEOUT_MS);
-
-      const finish = (err) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        killProcs([dl, ff]);
-        reject(err);
-      };
-
-      try {
-        dl = spawn(YOUTUBE_DL_PATH, dlArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-      } catch (err) {
-        return reject(err);
-      }
-      dl.on('error', (err) => finish(err));
-      dl.stderr.on('data', (d) => {
-        dlStderr = (dlStderr + d.toString()).slice(-2000);
-        if (process.env.DEBUG_MUSIC) console.log('[MUSIC] yt-dlp:', d.toString().slice(0, 200));
-      });
-
-      try {
-        ff = spawn(
-          ffmpegStatic,
-          [
-            '-fflags', 'nobuffer',
-            '-analyzeduration', '0',
-            '-probesize', '32',
-            '-i', '-',
-            ...(filterArgs.length ? ['-af', filterArgs.join(',')] : []),
-            '-vn',
-            '-f', 's16le',
-            '-ar', '48000',
-            '-ac', '2',
-            '-loglevel', 'error',
-            '-'
-          ],
-          { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }
-        );
-      } catch (err) {
-        return finish(err);
-      }
-      ff.on('error', (err) => finish(err));
-      ff.stderr.on('data', (d) => {
-        ffStderr = (ffStderr + d.toString()).slice(-2000);
-        if (process.env.DEBUG_MUSIC) console.log('[MUSIC] ffmpeg:', d.toString().slice(0, 200));
-      });
-      dl.stdout.pipe(ff.stdin);
-      dl.stdout.on('error', (err) => {
-        if (err.code !== 'EPIPE') console.error('[MUSIC] yt-dlp stdout:', err.message);
-      });
-      ff.stdin.on('error', () => {});
-
-      ff.stdout.once('data', () => {
-        dataReceived = true;
-        clearTimeout(timer);
-        if (!settled) {
-          settled = true;
-          resolve(ff.stdout);
-        }
-      });
-      ff.stdout.on('error', (err) => finish(err));
-      ff.on('exit', (code) => {
-        if (!dataReceived && code !== null && code !== 0 && dl.exitCode === 0) {
-          finish(new Error(`FFmpeg salió con código ${code}: ${ffStderr.slice(-200) || 'sin stderr'}`));
-        }
-      });
-      dl.on('exit', (code) => {
-        if (!dataReceived && code !== null && code !== 0) {
-          const errLine = dlStderr.split('\n').find((l) => /^ERROR|ERROR:/i.test(l)) || dlStderr.slice(0, 200);
-          finish(new Error(`yt-dlp salió con código ${code}: ${errLine.slice(0, 300) || 'sin stderr'}`));
-        }
-      });
-
-      q.procs = [dl, ff];
-    });
-  }
-
-  skip(guildId) {
-    const q = this.queues.get(guildId);
-    if (!q) return null;
-    const skipped = q.current;
-    if (skipped && skipped.url) q.retriedUrl = skipped.url;
-    q.player.stop(true);
-    return skipped;
-  }
-
-  stop(guildId) {
-    const q = this.queues.get(guildId);
-    if (!q) return;
-    q.tracks = [];
-    q.current = null;
-    q.player.stop(true);
-    killProcs(q.procs);
-    q.procs = [];
-    if (q.connection) q.connection.destroy();
-    this.queues.delete(guildId);
-  }
-
-  pause(guildId) {
-    const q = this.queues.get(guildId);
-    if (!q) return false;
-    q.player.pause();
-    return true;
-  }
-
-  resume(guildId) {
-    const q = this.queues.get(guildId);
-    if (!q) return false;
-    q.player.unpause();
-    return true;
-  }
-
   toggleLoop(guildId) {
     const q = this.getQueue(guildId);
     q.loop = !q.loop;
     return q.loop;
   }
 
+  ensurePlayer(guildId, voiceChannel, q) {
+    if (this.riffy && !this.connectedNodes().length) {
+      throw new Error('Sin nodos Lavalink conectados. La música está temporalmente caída; reinténtalo en unos segundos.');
+    }
+    let pl = this.riffy.players.get(guildId);
+    if (!pl) {
+      const textId = q.textChannel && q.textChannel.id ? q.textChannel.id : voiceChannel.id;
+      pl = this.riffy.createConnection({
+        guildId,
+        voiceChannel: voiceChannel.id,
+        textChannel: textId,
+        deaf: true,
+        loop: 'none',
+        defaultVolume: q.volume
+      });
+    } else if (voiceChannel.id !== pl.voiceChannel) {
+      try { pl.setVoiceChannel(voiceChannel.id, { deaf: true }); } catch (_) {}
+    }
+    if (pl.volume !== q.volume) {
+      try { pl.setVolume(q.volume); } catch (_) {}
+    }
+    this.applyFilters(q);
+    return pl;
+  }
+
+  // Convierte nuestro track a un Track de Riffy reproducible. Si llegó de resolveQuery
+  // ya lleva `_lv` cacheado (con .track encoded); si no, se re-resuelve en el nodo.
+  async toLavalinkTrack(track) {
+    if (track && track._lv !== undefined) return track._lv;
+    if (!this.riffy || !this.connectedNodes().length) return null;
+    const qy = track && track.url ? track.url : track && track.title;
+    if (!qy) return null;
+    const res = await this.searchTracks(qy).catch(() => null);
+    if (res && this.extractTracks(res).length && (this.extractTracks(res)[0].encoded || this.extractTracks(res)[0].track)) return this.extractTracks(res)[0];
+    return null;
+  }
+
+  // Recrea un player limpio cuando el que tenemos quedó obsoleto (riffy lo destruyó al
+  // caerse la sesión de voz o migrar de nodo y `connected` ya no está). devuelve el
+  // nuevo player o null si no hay canal de voz registrado.
+  recreatePlayer(guildId, q) {
+    const vcId = q.pl && q.pl.voiceChannel
+      ? q.pl.voiceChannel
+      : (q.connection && q.connection.joinConfig && q.connection.joinConfig.channelId);
+    if (!vcId) return null;
+    try { q.pl.destroy(); } catch (_) {}
+    try {
+      const textId = q.textChannel && q.textChannel.id ? q.textChannel.id : vcId;
+      const pl = this.riffy.createConnection({
+        guildId,
+        voiceChannel: vcId,
+        textChannel: textId,
+        deaf: true,
+        loop: 'none',
+        defaultVolume: q.volume
+      });
+      if (pl.volume !== q.volume) {
+        try { pl.setVolume(q.volume); } catch (_) {}
+      }
+      this.applyFilters(q);
+      return pl;
+    } catch (err) {
+      console.warn(`[MUSIC] recrear jugador lavalink: ${err && err.message}`);
+      return null;
+    }
+  }
+
+  // Encola el track y llama a play() de Riffy. Si el player está obsoleto
+  // ('Player connection is not initiated'), recrea la conexión y reintenta una vez.
+  async playNative(guildId, q, riffyTrack) {
+    try {
+      q.pl.queue.clear();
+      q.pl.queue.add(riffyTrack);
+      await q.pl.play();
+    } catch (err) {
+      if (/connection is not initiated/i.test(String(err && err.message || ''))) {
+        const pl2 = this.recreatePlayer(guildId, q);
+        if (!pl2) throw err;
+        q.pl = pl2;
+        q.pl.queue.clear();
+        q.pl.queue.add(riffyTrack);
+        await q.pl.play();
+        return;
+      }
+      throw err;
+    }
+  }
+
+  // Espera a que el nodo tenga credenciales de voz (sessionId + endpoint + token) antes
+  // de mandar el tema. resolve() ya aborta solo a los 10s.
+  async waitVoice(pl) {
+    if (pl.connection.isReady) return;
+    try { await pl.connection.resolve(); } catch (_) {}
+    if (!pl.connection.isReady) {
+      throw new Error('Lavalink no confirmó la conexión de voz (10s). Revisa permisos Connect/Speak en el canal y el estado del nodo.');
+    }
+  }
+
+  async play(guildId, voiceChannel, track) {
+    const q = this.getQueue(guildId);
+    if (!track || !voiceChannel) return q;
+    const pl = this.ensurePlayer(guildId, voiceChannel, q);
+    q.pl = pl;
+    q._radioFilled = false;
+    if (q.finishTimer) {
+      clearTimeout(q.finishTimer);
+      q.finishTimer = null;
+    }
+    q.tracks.push(track);
+    if (!q._playing || q.paused) await this.advance(guildId);
+    return q;
+  }
+
+  // Con discreción: un único disparo por tema gracias a q._advancing.
+  async advance(guildId) {
+    const q = this.queues.get(guildId);
+    if (!q || !q.pl) return null;
+    if (q._advancing) return null;
+    q._advancing = true;
+    try {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        let track = q.tracks.shift();
+        if (!track) {
+          if (q.loop && q.current) {
+            track = q.current;
+          } else if (q.autoplay && q.current && q.current.url) {
+            try {
+              const rel = await this.getRelated(q.current);
+              if (rel) {
+                track = rel;
+                q.autoplayFailures = 0;
+              } else {
+                q.autoplayFailures += 1;
+              }
+            } catch (_) {
+              q.autoplayFailures += 1;
+            }
+            if (!track && q.autoplayFailures >= 3) {
+              console.warn('[MUSIC] autoplay: 3 fallas seguidas sin relacionado válido; autoplay desactivado');
+              q.autoplay = false;
+            }
+          }
+          if (!track) {
+            this.finishQueue(guildId);
+            return null;
+          }
+        }
+        q.current = track;
+        q.paused = false;
+        const lv = await this.toLavalinkTrack(track);
+        if (!lv) {
+          this.notifyText(q, `❌ No pude cargar **${track.title}** en Lavalink; saltándola...`);
+          continue;
+        }
+        try {
+          await this.waitVoice(q.pl);
+          const lvInfo = lv.info || {};
+          const riffyTrack = {
+            track: lv.track || lv.encoded,
+            encoded: lv.track || lv.encoded,
+            info: {
+              identifier: lvInfo.identifier,
+              seekable: lvInfo.isSeekable,
+              author: lvInfo.author,
+              length: lvInfo.length,
+              stream: lvInfo.isStream,
+              position: 0,
+              title: lvInfo.title,
+              uri: lvInfo.uri,
+              requester: null,
+              sourceName: lvInfo.sourceName,
+              isrc: lvInfo.isrc || null,
+              thumbnail: lvInfo.thumbnail || lvInfo.artworkUrl || null
+            }
+          };
+          q.pl.queue.clear();
+          q.pl.queue.add(riffyTrack);
+          await this.playNative(guildId, q, riffyTrack);
+          q._playing = true;
+          this.notifyText(q, `▶️ Reproduciendo: **${track.title}**`);
+          if (track.radioUrl && !q._radioFilled) {
+            q._radioFilled = true;
+            this.fillRadioRelated(guildId, track);
+          }
+          return track;
+        } catch (err) {
+          q._playing = false;
+          const msg = String(err && err.message || err).slice(0, 200);
+          console.error(`[MUSIC] error reproduciendo "${track.title}":`, msg);
+          this.notifyText(q, `❌ No pude reproducir **${track.title}**: ${msg}`);
+          if (!q.tracks.length) {
+            this.finishQueue(guildId);
+            return null;
+          }
+        }
+      }
+      this.finishQueue(guildId);
+      return null;
+    } finally {
+      q._advancing = false;
+    }
+  }
+
+  notifyText(q, text) {
+    if (q.textChannel && q.textChannel.isSendable && q.textChannel.isSendable()) {
+      q.textChannel.send(text).catch(() => {});
+    }
+  }
+
+  onTrackEnded(guildId) {
+    const q = this.queues.get(guildId);
+    if (!q || !q.pl) return;
+    if (q._advancing) return;
+    const now = Date.now();
+    if (now - (q._lastEndAt || 0) < 300) return;
+    q._lastEndAt = now;
+    setImmediate(() => {
+      this.advance(guildId).catch((err) => {
+        console.error(`[MUSIC] error en advance(${guildId}):`, err && err.message);
+      });
+    });
+  }
+
+  finishQueue(guildId) {
+    const q = this.queues.get(guildId);
+    if (!q) return null;
+    q.current = null;
+    q._playing = false;
+    q.paused = false;
+    if (q.finishTimer) clearTimeout(q.finishTimer);
+    q.finishTimer = setTimeout(() => {
+      const qq = this.queues.get(guildId);
+      if (qq && !qq.tracks.length && !qq._playing && qq.pl && !qq.pl.playing) {
+        try { qq.pl.destroy(); } catch (_) {}
+        qq.pl = null;
+        qq.connection = null;
+        this.queues.delete(guildId);
+      }
+    }, 30000);
+    return null;
+  }
+
+  // Autoplay: búsqueda relacionada en el nodo (IP del nodo, sin bot-check), como hace
+  // el autoplay nativo de Riffy. Se salta el candidato que coincida con el tema actual.
+  async getRelated(track) {
+    const qy = [track && track.author, track && track.title].filter(Boolean).join(' ').trim();
+    if (!qy || !this.riffy || !this.connectedNodes().length) return null;
+    const res = await this.textSearch(qy).catch(() => null);
+    if (!res || !this.extractTracks(res).length) {
+      console.warn(`[MUSIC] autoplay: sin relacionado para "${(track.title || '').slice(0, 50)}"`);
+      return null;
+    }
+    for (const lv of this.extractTracks(res)) {
+      if (!lv || !(lv.encoded || lv.track) || !lv.info) continue;
+      if (track.url && lv.info.uri === track.url) continue;
+      return fromLavalinkTrack(lv);
+    }
+    return null;
+  }
+
+  // Normaliza la respuesta de loadtracks: los nodos v4 devuelven {loadType, data}
+  // (['search'] → data es array; 'track' → data es el track; 'playlist' → data.tracks).
+  extractTracks(r) {
+    if (!r) return [];
+    const lt = r.loadType;
+    if (lt === 'playlist') return (r.data && Array.isArray(r.data.tracks)) ? r.data.tracks : (Array.isArray(r.tracks) ? r.tracks : []);
+    if (lt === 'track') return r.data ? [r.data] : (Array.isArray(r.tracks) ? r.tracks : []);
+    if (lt === 'search') return Array.isArray(r.data) ? r.data : (Array.isArray(r.tracks) ? r.tracks : []);
+    if (Array.isArray(r.tracks)) return r.tracks;
+    if (Array.isArray(r.data)) return r.data;
+    if (Array.isArray(r.data && r.data.tracks)) return r.data.tracks;
+    return [];
+  }
+
+  // loadtracks de un nodo con timeout propio: si el nodo se cuelga (p. ej. YouTube sin
+  // PO tokens tarda ~60s), volvemos ya y probamos el siguiente. La petición original
+  // queda viva en segundo plano pero sin unhandledRejection.
+  async tryLoad(node, identifier, timeoutMs) {
+    if (!node || !node.connected || !node.sessionId) return null;
+    const p = node.rest.makeRequest('GET', `/${node.rest.version}/loadtracks?identifier=${encodeURIComponent(identifier)}`)
+      .then((r) => r)
+      .catch(() => null);
+    const guard = new Promise((res) => setTimeout(() => res(null), timeoutMs || 10000));
+    return Promise.race([p, guard]);
+  }
+
+  // Busca en los primeros nodos conectados (hasta 3) hasta que uno devuelva resultados.
+  searchTracks(identifier) {
+    const nodes = this.connectedNodes();
+    if (!nodes.length) return Promise.resolve(null);
+    const cycle = async (i) => {
+      if (i >= nodes.length || i >= 3) return null;
+      const r = await this.tryLoad(nodes[i], identifier, 10000);
+      if (r && typeof r.loadType === 'string' && !/empty|no.?matches/i.test(r.loadType) && this.extractTracks(r).length) return r;
+      if (r) console.warn(`[MUSIC] ${nodes[i].name} sin resultados (${r.loadType}) para "${String(identifier).slice(0, 50)}"; pruebo otro nodo`);
+      return cycle(i + 1);
+    };
+    return cycle(0);
+  }
+
+  textSearch(query) {
+    const plat = (this.riffy && this.riffy.defaultSearchPlatform) || 'ytmsearch';
+    const tokens = [query].filter(Boolean);
+    const searchers = [
+      (q) => this.searchTracks(`${plat}:${q}`),
+      (q) => this.searchTracks(`scsearch:${q}`)
+    ];
+    return searchers
+      .reduce((chain, fn) => chain.then((res) => res || fn(tokens[0])), Promise.resolve(null));
+  }
+
+  // Búsqueda / carga de URL contra el nodo. El loadtracks del nodo reemplaza toda la
+  // maquinaria yt-dlp (bot-check, cookies). Excepción: list=RD<id> (radios). Lavalink
+  // sin PO tokens tarda ~60s y vuelve vacío en esos endpoints, así que la radio se
+  // responde YA con el video suelto (carga rápida 'track') marcado con t.radioUrl, y
+  // la continuación de la radio se rellena por búsqueda relacionada en segundo plano.
+  async resolveQuery(query) {
+    const trimmed = String(query || '').trim();
+    if (!this.riffy) {
+      console.warn('[MUSIC] Riffy no inicializado todavía');
+      return [];
+    }
+    if (!this.connectedNodes().length) {
+      console.warn('[MUSIC] sin nodos lavalink conectados para resolver la búsqueda');
+      return [];
+    }
+    const isUrl = /^https?:\/\//i.test(trimmed);
+    let radioUrl = null;
+    let effective = trimmed;
+    if (isUrl && /[?&]list=RD[\w-]*/i.test(trimmed)) {
+      const vMatch = trimmed.match(/[?&]v=([\w-]{6,})/);
+      effective = vMatch ? `https://www.youtube.com/watch?v=${vMatch[1]}` : (trimmed.split(/[?&]/)[0] || trimmed);
+      radioUrl = trimmed;
+    }
+    try {
+      const res = isUrl ? await this.searchTracks(effective) : await this.textSearch(effective);
+      const tracks = res ? this.extractTracks(res) : [];
+      const loadType = res && res.loadType;
+      const out = [];
+      for (const lv of tracks) {
+        if (!lv || !(lv.encoded || lv.track) || !lv.info || !lv.info.uri) continue;
+        out.push(fromLavalinkTrack(lv));
+      }
+      if (!out.length) {
+        console.warn(`[MUSIC] lavalink: loadType=${loadType} sin tracks válidos para "${trimmed.slice(0, 60)}"`);
+        return [];
+      }
+      if (radioUrl) out[0].radioUrl = radioUrl;
+      const isPlaylist = loadType === 'playlist' || loadType === 'PLAYLIST_LOADED';
+      console.log(`[MUSIC] ${isUrl ? 'carga' : 'búsqueda'} resuelta por lavalink (${loadType}, ${out.length} temas) para "${trimmed.slice(0, 60)}"`);
+      return isPlaylist ? out : out.slice(0, 1);
+    } catch (err) {
+      console.error('[MUSIC] error resolviendo query:', err && err.message);
+      this.addWarning(`⚠️ Lavalink falló al resolver "${trimmed.slice(0, 50)}": ${String(err && err.message).slice(0, 120)}`);
+      return [];
+    }
+  }
+
+  // Sustituto del viejo fillRadio (flat-playlist de yt-dlp): rellena la cola con hasta
+  // 5 relacionados por TEXT SEARCH del tema actual (el nodo no hanga como con list=RD).
+  async fillRadioRelated(guildId, track) {
+    const q = this.queues.get(guildId);
+    if (!q) return;
+    const qy = [track && track.author, track && track.title].filter(Boolean).join(' ').trim();
+    if (!qy) return;
+    const res = await this.textSearch(qy).catch(() => null);
+    if (!res) return;
+    // `added` DEBE declararse aquí: sin declaración, `added++` creaba un global NaN y el
+    // tope de 5 nunca se cumplía (la radio volcaba TODOS los resultados a la cola).
+    let added = 0;
+    for (const lv of this.extractTracks(res)) {
+      if (!lv || !(lv.encoded || lv.track) || !lv.info || !lv.info.uri) continue;
+      const u = lv.info.uri;
+      const q2 = this.queues.get(guildId);
+      if (!q2) return;
+      if (track.url && u === track.url) continue;
+      if (q2.current && q2.current.url === u) continue;
+      if (q2.tracks.some((t) => t.url === u)) continue;
+      q2.tracks.push(fromLavalinkTrack(lv));
+      added++;
+      if (added >= 5) break;
+    }
+    console.log(`[MUSIC] radio: rellenadas ${added} canciones relacionadas en la cola`);
+  }
+
+  skip(guildId) {
+    const q = this.queues.get(guildId);
+    if (!q) return null;
+    const cur = q.current;
+    if (!cur) return null;
+    if (q.pl) {
+      try { q.pl.stop(); } catch (_) {}
+    }
+    this.onTrackEnded(guildId);
+    return cur;
+  }
+
+  stop(guildId) {
+    const q = this.queues.get(guildId);
+    if (!q) return;
+    if (q.finishTimer) clearTimeout(q.finishTimer);
+    const pl = q.pl;
+    q.tracks = [];
+    q.current = null;
+    q._playing = false;
+    q.paused = false;
+    if (pl) {
+      try { pl.destroy(); } catch (_) {}
+    }
+    q.pl = null;
+    q.connection = null;
+    this.queues.delete(guildId);
+  }
+
+  pause(guildId) {
+    const q = this.queues.get(guildId);
+    if (!q || !q.pl || q.paused || !q._playing) return false;
+    q.paused = true;
+    try { q.pl.pause(true); } catch (_) {}
+    return true;
+  }
+
+  resume(guildId) {
+    const q = this.queues.get(guildId);
+    if (!q || !q.pl || !q.paused) return false;
+    q.paused = false;
+    try { q.pl.pause(false); } catch (_) {}
+    return true;
+  }
+
   isPlaying(guildId) {
     const q = this.queues.get(guildId);
-    return q && (q.player.state.status === AudioPlayerStatus.Playing || q.player.state.status === AudioPlayerStatus.Buffering);
+    return !!(q && q.pl && q._playing && !q.paused);
   }
 
   nowPlaying(guildId) {
@@ -633,11 +785,6 @@ class PlayerManager {
   queueList(guildId) {
     const q = this.queues.get(guildId);
     return q ? q.tracks : [];
-  }
-
-  getVolume(guildId) {
-    const q = this.queues.get(guildId);
-    return q ? q.volume : null;
   }
 
   getState(guildId) {
@@ -652,4 +799,8 @@ class PlayerManager {
   }
 }
 
-module.exports = new PlayerManager();
+const manager = new PlayerManager();
+// Expuesto SOLO para diagnóstico/tests (los consumidores usan la instancia normal).
+manager.lavalinkNodes = lavalinkNodes;
+manager.isLoopbackNode = isLoopbackNode;
+module.exports = manager;

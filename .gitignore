@@ -4,8 +4,16 @@ cookies.txt
 galaxy-dashboard.html
 bot.log
 bot.err.log
+bot.pid
+diag.js
 crash.log
 *.log
 *.zip
 .DS_Store
 vendor/pot-provider/node_modules/
+# Copias de trabajo de las cookies de Google (resolveCookieFile) y extracciones PyInstaller
+# de yt-dlp: temporales del host, NUNCA al repo (contienen la sesion real).
+.ytdlp-tmp/
+# Lavalink local del PC de casa: el jar y el JRE se descargan solos y pesan ~150 MB.
+lavalink-local/jre/
+lavalink-local/Lavalink.jar
