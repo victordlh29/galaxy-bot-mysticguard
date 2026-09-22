@@ -28,17 +28,17 @@ const EVENT_LABELS = {
 
 function buildLogEmbed(guild, { icon, title, description, userTag, footerLabel }) {
   const avatar = guild && guild.client ? guild.client.user.displayAvatarURL({ size: 64 }) : undefined;
-  const now = new Date();
-  const dd = String(now.getDate()).padStart(2, '0');
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const yyyy = now.getFullYear();
-  const time = now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: true });
+  // La hora la pinta DISCORD (.setTimestamp), no el host: Discord la renderiza en la zona
+  // horaria e idioma de QUIEN LEE, así que el sello coincide siempre con la hora real del
+  // mensaje. Antes se formateaba aquí con la TZ del proceso — y el hosting corre en UTC,
+  // así que el usuario veía el registro desfasado varias horas respecto al mensaje.
   const embed = new EmbedBuilder()
     .setColor('#5B21B6')
     .setAuthor({ name: `MysticGuard · ${guild ? guild.name : 'Servidor'}`, iconURL: avatar })
     .setTitle(`${icon} ${EVENT_LABELS[title] || title}`)
     .setDescription(description || '—')
-    .setFooter({ text: `MysticGuard · ${footerLabel} • ${dd}/${mm}/${yyyy} ${time}`, iconURL: avatar });
+    .setFooter({ text: `MysticGuard · ${footerLabel}`, iconURL: avatar })
+    .setTimestamp(new Date());
   if (userTag) embed.addFields({ name: 'Usuario', value: userTag, inline: true });
   return embed;
 }

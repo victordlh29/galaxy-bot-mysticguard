@@ -88,20 +88,17 @@ function buildRulesEmbed(text, { guild } = {}) {
 
   const avatar = guild?.client?.user?.displayAvatarURL({ size: 64 });
 
-  const now = new Date();
-  const dd = String(now.getDate()).padStart(2, '0');
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const yyyy = now.getFullYear();
-  const time = now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: true });
-  const dateStr = `${dd}/${mm}/${yyyy} ${time}`;
-
+  // Fecha/hora con el sello nativo de Discord (se renderiza en la zona horaria de quien
+  // lee). Formatearla con la TZ del proceso daba una hora distinta a la del mensaje cuando
+  // el bot corre en un host con otra zona (el hosting va en UTC).
   return new EmbedBuilder()
     .setColor('#5B21B6')
     .setAuthor({ name: guild ? `MysticGuard · ${guild.name}` : 'MysticGuard', iconURL: avatar })
     .setTitle(title)
     .setDescription(desc.join('\n'))
     .addFields(fields.map((f) => ({ name: f.name, value: f.value })))
-    .setFooter({ text: `MysticGuard - Reglas del Servidor • ${dateStr}`, iconURL: avatar });
+    .setFooter({ text: 'MysticGuard - Reglas del Servidor', iconURL: avatar })
+    .setTimestamp(new Date());
 }
 
 module.exports = { DEFAULT_RULES_TEXT, OLD_RULES_TEXT, buildRulesEmbed };
